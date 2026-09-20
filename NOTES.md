@@ -144,6 +144,32 @@ ELF 側で `LLMError` を外すと、移行後に既存の捕捉が素通りし�
 
 同じ理由で `LLMOpsError` の基底を `RuntimeError` にした(既存 `LLMError(RuntimeError)` 互換)。
 
+### N-018 front matter の `status` は初回登録時のみ有効にした
+`llmops sync` が新 version を作るとき、front matter の `status` をそのまま採ると、
+ファイルを編集して `status: published` と書くだけで状態機械と評価ゲート(Phase 2)を
+迂回できてしまう。一方、常に `draft` から始めると、**既に本番で動いている** Prompt を
+移行する初回登録でも submit → approve → publish を踏む必要があり、
+「移行で挙動を変えない」(docs/05)と噛み合わない。
+
+折衷として、**初回登録(version 1)に限り front matter の `status` を尊重**し、
+2回目以降の新 version は必ず `draft` から始める(宣言があれば WARN)。
+移行は宣言どおりに入り、以後の**変更**は必ずゲートを通る。
+
+`version` も同様に front matter の値は採番に使わない(DB の採番が正)。
+宣言と食い違う場合は WARN のみ。版番号の真実を2箇所に持たせないため。
+
+### N-019 `prompt_versions.body` には fragment 展開後の本文を格納する
+設計 §2.2 は「front matter 除去後の本文テンプレート」としか書いておらず、
+fragment 展開の前後どちらかが読み取れない。展開後を採った理由:
+
+- `content_hash` は展開後で計算すると設計に明記されている。body も展開後にそろえると、
+  「その版が実際に何を送ったか」が1行で再現できる(再現性が資産管理の目的そのもの)
+- 展開前だと、実行のたびに fragment ファイルの現在値を読む必要があり、
+  「古い版を resolve したのに fragment だけ最新」というズレが起きる
+- `llmops prompt diff` が、実際に送られるテキストの差分になる
+
+fragment 自身も `_fragments.<name>` として別途版管理されるので、履歴は失われない。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

@@ -45,9 +45,9 @@ strict = true
 files = ["src/llmops"]
 
 [[tool.mypy.overrides]]
-# optional extra `sdk-anthropic`。未インストール環境(CI含む)で型検査を落とさない。
-# Adapter は SDK を遅延 import し、未解決は実行時に AdapterUnavailable にする
-module = ["anthropic"]
+# optional extra(`sdk-anthropic` / `eval`)。未インストール環境で型検査を落とさない。
+# いずれも遅延 import し、未解決時は実行時にフォールバックまたは明示エラーにする
+module = ["anthropic", "jsonschema"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from llmops.db.connection import connect, init_schema
-from llmops.models import SpanEnd, SpanStart, TraceStart
+from llmops.models import PromptVersionRow, SpanEnd, SpanStart, TraceStart
 
 
 def utcnow() -> str:
@@ -224,3 +224,175 @@ class Repository:
                 (f"{month}-%", system),
             ).fetchone()
         return float(row["total"])
+
+    # ------------------------------------------------------------------
+    # prompt_versions / prompt_deployments / prompt_transitions
+    # ------------------------------------------------------------------
+    def insert_prompt_version(self, version: PromptVersionRow) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO prompt_versions (
+                prompt_id, version, status, body, front_matter, var_schema,
+                content_hash, source_path, owner, note, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                version.prompt_id,
+                version.version,
+                version.status,
+                version.body,
+                version.front_matter,
+                version.var_schema,
+                version.content_hash,
+                version.source_path,
+                version.owner,
+                version.note,
+                utcnow(),
+                utcnow(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_prompt_version(self, prompt_id: str, version: int) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM prompt_versions WHERE prompt_id = ? AND version = ?",
+            (prompt_id, version),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def latest_prompt_version(self, prompt_id: str) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM prompt_versions WHERE prompt_id = ? ORDER BY version DESC LIMIT 1",
+            (prompt_id,),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def list_prompt_versions(self, prompt_id: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM prompt_versions WHERE prompt_id = ? ORDER BY version",
+                (prompt_id,),
+            ).fetchall()
+        )
+
+    def list_prompts(self, *, status: str | None = None) -> list[sqlite3.Row]:
+        """prompt_id ごとの最新版を返す(カタログ表示用)。"""
+        sql = """
+            SELECT pv.*, pd.active_version, pd.canary_version, pd.canary_percent
+              FROM prompt_versions pv
+              JOIN (SELECT prompt_id, MAX(version) AS version
+                      FROM prompt_versions GROUP BY prompt_id) latest
+                ON pv.prompt_id = latest.prompt_id AND pv.version = latest.version
+              LEFT JOIN prompt_deployments pd ON pd.prompt_id = pv.prompt_id
+        """
+        params: tuple[str, ...] = ()
+        if status is not None:
+            sql += " WHERE pv.status = ?"
+            params = (status,)
+        sql += " ORDER BY pv.prompt_id"
+        return list(self.conn.execute(sql, params).fetchall())
+
+    def set_prompt_status(self, prompt_id: str, version: int, status: str) -> None:
+        self.conn.execute(
+            "UPDATE prompt_versions SET status = ?, updated_at = ?"
+            " WHERE prompt_id = ? AND version = ?",
+            (status, utcnow(), prompt_id, version),
+        )
+        self.conn.commit()
+
+    def get_deployment(self, prompt_id: str) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM prompt_deployments WHERE prompt_id = ?", (prompt_id,)
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def set_deployment(
+        self,
+        prompt_id: str,
+        *,
+        active_version: int,
+        canary_version: int | None = None,
+        canary_percent: int = 0,
+        actor: str | None = None,
+    ) -> None:
+        """publish / rollback / canary はこの1行の更新で完結する(FR-050)。"""
+        self.conn.execute(
+            """
+            INSERT INTO prompt_deployments
+                (prompt_id, active_version, canary_version, canary_percent, updated_at, updated_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(prompt_id) DO UPDATE SET
+                active_version = excluded.active_version,
+                canary_version = excluded.canary_version,
+                canary_percent = excluded.canary_percent,
+                updated_at = excluded.updated_at,
+                updated_by = excluded.updated_by
+            """,
+            (prompt_id, active_version, canary_version, canary_percent, utcnow(), actor),
+        )
+        self.conn.commit()
+
+    def insert_prompt_transition(
+        self,
+        *,
+        prompt_id: str,
+        version: int,
+        from_status: str | None,
+        to_status: str,
+        actor: str | None = None,
+        reason: str | None = None,
+        eval_run_id: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO prompt_transitions
+                (prompt_id, version, from_status, to_status, actor, reason, eval_run_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (prompt_id, version, from_status, to_status, actor, reason, eval_run_id, utcnow()),
+        )
+        self.conn.commit()
+
+    def list_prompt_transitions(self, prompt_id: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM prompt_transitions WHERE prompt_id = ? ORDER BY id",
+                (prompt_id,),
+            ).fetchall()
+        )
+
+    def prompt_last_used_at(self, prompt_id: str) -> str | None:
+        """最終利用日を `spans` から導出する(FR-052 の下ごしらえ)。"""
+        row = self.conn.execute(
+            "SELECT MAX(created_at) AS last_used FROM spans WHERE prompt_id = ?", (prompt_id,)
+        ).fetchone()
+        return None if row is None or row["last_used"] is None else str(row["last_used"])
+
+    # ------------------------------------------------------------------
+    # audit_logs
+    # ------------------------------------------------------------------
+    def insert_audit_log(
+        self,
+        *,
+        event: str,
+        actor: str | None = None,
+        subject: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO audit_logs (event, actor, subject, detail_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (event, actor, subject, _dumps(detail), utcnow()),
+        )
+        self.conn.commit()
+
+    def list_audit_logs(self, *, event: str | None = None, limit: int = 50) -> list[sqlite3.Row]:
+        if event is None:
+            rows = self.conn.execute(
+                "SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM audit_logs WHERE event = ? ORDER BY id DESC LIMIT ?", (event, limit)
+            ).fetchall()
+        return list(rows)

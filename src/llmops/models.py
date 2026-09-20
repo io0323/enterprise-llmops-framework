@@ -67,3 +67,24 @@ class SpanEnd:
     num_turns: int | None = None
     provider_session: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Prompt Registry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PromptVersionRow:
+    """`prompt_versions` の1行。"""
+
+    prompt_id: str
+    version: int
+    status: str
+    body: str
+    front_matter: str
+    content_hash: str
+    source_path: str
+    var_schema: str | None = None
+    owner: str | None = None
+    note: str | None = None
