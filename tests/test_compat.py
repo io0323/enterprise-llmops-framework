@@ -16,7 +16,8 @@ from llmops.db.repository import Repository
 from llmops.errors import LLMBudgetExceeded, LLMError, PolicyViolation
 from llmops.gateway import Runtime
 from llmops.sdk import LLMOps
-from llmops.sdk.compat import LLMClient, _llmops_section
+from llmops.sdk.client import app_config_section
+from llmops.sdk.compat import LLMClient
 
 
 @pytest.fixture()
@@ -249,26 +250,26 @@ def test_llmops_section_from_raw_dict() -> None:
     class AppConfig:
         raw = {"llmops": {"system": "cgmp", "model": "dde-batch"}}
 
-    assert _llmops_section(AppConfig())["model"] == "dde-batch"
+    assert app_config_section(AppConfig())["model"] == "dde-batch"
 
 
 def test_llmops_section_from_attribute() -> None:
     class AppConfig:
         llmops = {"model": "chat-fast"}
 
-    assert _llmops_section(AppConfig())["model"] == "chat-fast"
+    assert app_config_section(AppConfig())["model"] == "chat-fast"
 
 
 def test_llmops_section_from_plain_dict() -> None:
-    assert _llmops_section({"llmops": {"model": "m"}})["model"] == "m"
+    assert app_config_section({"llmops": {"model": "m"}})["model"] == "m"
 
 
 def test_llmops_section_missing_is_empty() -> None:
     class AppConfig:
         pass
 
-    assert _llmops_section(AppConfig()) == {}
-    assert _llmops_section(None) == {}
+    assert app_config_section(AppConfig()) == {}
+    assert app_config_section(None) == {}
 
 
 def test_repo_argument_is_accepted_and_ignored(raw_runtime: Runtime) -> None:

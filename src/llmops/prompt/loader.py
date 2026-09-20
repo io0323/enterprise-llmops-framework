@@ -103,7 +103,9 @@ def split_front_matter(text: str, path: Path) -> tuple[dict[str, Any], str, str]
     Returns:
         (front matter の dict, front matter の原文, 本文)
     """
-    lines = text.splitlines()
+    # `splitlines()` ではなく `split("\n")` を使う。末尾の改行を落とさないため
+    # (ゴールデンファイルとのバイト一致検証は末尾1バイトの差で落ちる)。
+    lines = text.split("\n")
     if not lines or lines[0].strip() != FRONT_MATTER_DELIMITER:
         raise PromptError(f"{path}: front matter(先頭の '---')がありません")
     try:
@@ -115,6 +117,7 @@ def split_front_matter(text: str, path: Path) -> tuple[dict[str, Any], str, str]
         raise PromptError(f"{path}: front matter が閉じられていません('---' が1つだけ)") from None
 
     front_matter_text = "\n".join(lines[1:end])
+    # 閉じ `---` の直後の空行だけを落とす。本文内部と末尾の改行はそのまま保つ
     body = "\n".join(lines[end + 1 :]).lstrip("\n")
 
     loaded = yaml.safe_load(front_matter_text) if front_matter_text.strip() else {}

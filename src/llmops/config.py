@@ -55,7 +55,12 @@ class GatewayConfig(_Base):
 
 class GuardConfig(_Base):
     calls_per_trace_limit: int = 10
+    #: system 別の上書き。0 で無制限(NOTES.md N-023)
+    calls_per_trace_limit_by_system: dict[str, int] = Field(default_factory=dict)
     hard_quota: bool = True
+
+    def calls_limit_for(self, system: str) -> int:
+        return self.calls_per_trace_limit_by_system.get(system, self.calls_per_trace_limit)
 
 
 class BudgetConfig(_Base):

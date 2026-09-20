@@ -190,6 +190,39 @@ DDE は `llmops.model: dde-batch` を指定してタイムアウト300秒を維�
 `llmops report cost --by system` が「全部 elf」になって横断観測の目的を満たさない。
 テストで固定した(`test_dde_call_records_system`)。
 
+### N-023 `calls_per_trace_limit` を system 別に上書きできるようにした
+`guard.calls_per_trace_limit: 10` は CGMP 絶対ルール3(1記事10回)を ELF 側で強制するもの。
+一方 DDE は「1ラン = 1 trace」で、1ランに expand / classify / cluster_naming が何十回も入る。
+同じ上限を当てると DDE が動かなくなる(既存を壊す)。
+
+`guard.calls_per_trace_limit_by_system` を足し、`dde: 0`(無制限)を既定にした。
+コードに例外を書かず設定で持つ(絶対ルール12)。CGMP は従来どおり 10 が効く。
+
+### N-024 DDE の移行手順(ゴールデンファイル)の実施記録
+1. **移行前**に `build_expand_prompt` / `build_classify_prompt` /
+   `build_cluster_naming_prompt` の出力を `tests/fixtures/golden/dde_*.txt` へ保存
+   (この時点で `prompts.py` には一切触れていない)
+2. `prompts/dde/*.md` は **テンプレート文字列を機械変換して生成**した
+   (`{{`→`{` / `}}`→`}` / `{x}`→`{{ x }}`)。手で書き写すと差分が入るため
+3. `tests/test_golden_prompts.py` でバイト一致を検証してから呼び出し側を切替
+4. 文言は一字も変えていない
+
+この過程で ELF 側のバグを1つ見つけた: `loader.split_front_matter` が
+`splitlines()` を使っており、本文末尾の改行を落としていた。バイト一致検証が
+無ければ気付かないまま、全 Prompt の末尾1バイトが変わっていた。
+**ゴールデン検証は「文言を変えない」ためだけでなく、移行基盤自体のバグ検出にも効く。**
+
+### N-025 DDE の `llm_logs` は検証対象から外し、`spans` に移した
+DDE の e2e テストは `llm_logs` の行数で「LLM が何回呼ばれたか」を検証していた。
+互換shim は `repo` を使わない(設計 §5.2)ため、移行後は `llm_logs` に行が入らない。
+同じ性質(呼び出し回数・成否・バッチであること)を ELF の `spans` に対して検証する形へ
+書き換えた。表を消してはいない(N-006 と同じ扱い。過去ログの参照先は残す)。
+
+テストの隔離も足した: DDE の e2e は `ELF_CONFIG` を一時ディレクトリの設定に向け、
+実物の `data/llmops.sqlite3` を汚さないようにしてある。
+(この隔離を入れる前に1回テストを流してしまい、実DBに 34 trace / 85 span が
+混入した。SQL で除去し `cost_daily` を `spans` から再構築済み。)
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

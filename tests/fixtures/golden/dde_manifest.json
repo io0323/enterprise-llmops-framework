@@ -1,0 +1,38 @@
+[
+  {
+    "name": "dde_expand",
+    "prompt_id": "dde.expand",
+    "variables": {
+      "seed": "テスト",
+      "max_keywords": 50,
+      "existing_count": 2,
+      "existing": "- テスト 自動化\n- テスト 副業"
+    }
+  },
+  {
+    "name": "dde_expand_no_existing",
+    "prompt_id": "dde.expand",
+    "variables": {
+      "seed": "副業",
+      "max_keywords": 20,
+      "existing_count": 0,
+      "existing": "(なし)"
+    }
+  },
+  {
+    "name": "dde_classify",
+    "prompt_id": "dde.classify",
+    "variables": {
+      "n": 3,
+      "keywords": "- テスト 自動化\n- テスト 副業 始め方\n- python 入門"
+    }
+  },
+  {
+    "name": "dde_cluster_naming",
+    "prompt_id": "dde.cluster_naming",
+    "variables": {
+      "n": 2,
+      "clusters": "- c0: テスト 自動化 / テスト 自動化 ツール\n- c1: テスト 副業"
+    }
+  }
+]

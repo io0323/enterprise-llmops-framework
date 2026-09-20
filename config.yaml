@@ -13,11 +13,16 @@ gateway:
   default_model: chat-standard    # front matter にも呼び出しにも model が無いときの既定(論理名)
   timeout_sec: 600
   allow_unpublished: false        # true は開発時のみ。本番 true なら起動時に警告
-  allow_raw_completion: false     # Registry管理外の呼び出し。移行期間のみ true
+  allow_raw_completion: true      # 移行期間のみ true(Phase 1 Step 1-7/1-8 の shim 経路)
+                                  # Prompt 外部化が終わったら false に戻す(docs/05 §6 のリスク表)
   fallback_enabled: true
 
 guard:
   calls_per_trace_limit: 10       # CGMP 絶対ルール3 を ELF 側で強制
+  calls_per_trace_limit_by_system: # system 別の上書き。0 で無制限
+    # DDE は「1ラン = 1 trace」で、1ランに expand / classify / cluster_naming が
+    # 何十回も入る。記事単位の上限を持たないシステムなので上限を外す(NOTES.md N-023)
+    dde: 0
   hard_quota: true
 
 budget:

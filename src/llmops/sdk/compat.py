@@ -21,47 +21,17 @@
 
 from __future__ import annotations
 
-import contextlib
-import os
 from typing import Any
 
-from llmops.config import ENV_CONFIG
 from llmops.errors import LLMBudgetExceeded, LLMError
 from llmops.gateway import Runtime
 from llmops.logging_utils import get_logger
 from llmops.models import CompletionResult
-from llmops.sdk.client import LLMOps
+from llmops.sdk.client import LLMOps, app_config_path, app_config_section
 
 logger = get_logger(__name__)
 
 __all__ = ["LLMBudgetExceeded", "LLMClient", "LLMError"]
-
-#: 既存 config の `llmops:` セクション名(`docs/05_既存システム統合.md` §2.2)
-CONFIG_SECTION = "llmops"
-
-
-def _llmops_section(config: Any) -> dict[str, Any]:
-    """アプリ側 Config から `llmops:` セクションを取り出す(取れなくても落とさない)。
-
-    CGMP / DDE の Config は実装が違う(`raw` 辞書を持つもの・属性のもの)。
-    どちらでも動くように順に試し、見つからなければ空とする。
-    """
-    candidates: list[Any] = []
-    for attr in ("raw", None):
-        holder = getattr(config, attr, None) if attr else config
-        if holder is None:
-            continue
-        getter = getattr(holder, "get", None)
-        if callable(getter):
-            with contextlib.suppress(KeyError, TypeError):
-                candidates.append(getter(CONFIG_SECTION))
-        candidates.append(getattr(holder, CONFIG_SECTION, None))
-
-    for section in candidates:
-        if isinstance(section, dict):
-            return dict(section)
-    return {}
-
 
 class LLMClient:
     """既存 `cgmp.llm.client.LLMClient` / `dde.llm.client.LLMClient` の代替。"""
@@ -76,11 +46,9 @@ class LLMClient:
         model: str | None = None,
     ) -> None:
         del repo  # 既存互換のため受け取るが使わない(記録先は ELF の DB)
-        section = _llmops_section(config)
+        section = app_config_section(config)
         self.system = system
-        # `docs/05_既存システム統合.md` §6: ELF_CONFIG を優先し、config_path は補助
-        config_path = None if os.environ.get(ENV_CONFIG) else section.get("config_path")
-        self.ops = ops or LLMOps.load(config_path, system=system)
+        self.ops = ops or LLMOps.load(app_config_path(section), system=system)
         self.model = model or section.get("model") or self.ops.config.gateway.default_model
         #: request_id → trace_id。呼び出し回数は trace 単位で数える
         self._traces: dict[str | None, str] = {}
@@ -101,7 +69,7 @@ class LLMClient:
 
     @property
     def call_limit(self) -> int:
-        return self.ops.config.guard.calls_per_trace_limit
+        return self.ops.config.guard.calls_limit_for(self.system)
 
     def _trace_id(self, request_id: str | None) -> str:
         """request_id ごとに1 trace を割り当てる(1記事 = 1 trace)。"""

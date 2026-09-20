@@ -67,9 +67,9 @@ class Guard:
 
     # ------------------------------------------------------------------
     def _check_calls(self, *, system: str, trace_id: str, needed: int) -> None:
-        limit = self.config.guard.calls_per_trace_limit
+        limit = self.config.guard.calls_limit_for(system)
         if limit <= 0:
-            return
+            return  # 0 は無制限(記事単位の上限を持たないシステム向け。N-023)
         used = self.repo.count_spans(trace_id)
         if used + needed <= limit:
             return

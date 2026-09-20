@@ -11,12 +11,14 @@ with ops.trace("article.generate", external_id=request_id):
 
 from __future__ import annotations
 
+import contextlib
+import os
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from llmops.config import Config
+from llmops.config import ENV_CONFIG, Config
 from llmops.errors import PolicyViolation
 from llmops.gateway import Runtime
 from llmops.logging_utils import get_logger
@@ -27,6 +29,40 @@ logger = get_logger(__name__)
 
 SUCCESS = "success"
 FAILED = "failed"
+
+#: 利用システム側 config.yaml に置く ELF 設定のセクション名(docs/05 §2.2)
+CONFIG_SECTION = "llmops"
+
+
+def app_config_section(config: Any) -> dict[str, Any]:
+    """利用システムの Config から `llmops:` セクションを取り出す(取れなくても落とさない)。
+
+    CGMP / DDE の Config は実装が違う(`raw` 辞書を持つもの・属性のもの)。
+    どちらでも動くように順に試し、見つからなければ空とする。
+    """
+    candidates: list[Any] = []
+    for attr in ("raw", None):
+        holder = getattr(config, attr, None) if attr else config
+        if holder is None:
+            continue
+        getter = getattr(holder, "get", None)
+        if callable(getter):
+            with contextlib.suppress(KeyError, TypeError):
+                candidates.append(getter(CONFIG_SECTION))
+        candidates.append(getattr(holder, CONFIG_SECTION, None))
+
+    for section in candidates:
+        if isinstance(section, dict):
+            return dict(section)
+    return {}
+
+
+def app_config_path(section: Mapping[str, Any]) -> str | None:
+    """ELF 設定のパス。`ELF_CONFIG` を優先し、アプリ側の `config_path` は補助(docs/05 §6)。"""
+    if os.environ.get(ENV_CONFIG):
+        return None
+    path = section.get("config_path")
+    return None if path is None else str(path)
 
 
 class TraceContext:
@@ -79,6 +115,15 @@ class LLMOps:
     ) -> LLMOps:
         runtime = Runtime.load(config_path, system=system, eval_gate=eval_gate)
         return cls(runtime, system)
+
+    @classmethod
+    def for_app(cls, app_config: Any, *, system: str, eval_gate: EvalGate | None = None) -> LLMOps:
+        """利用システムの Config(`llmops:` セクション付き)から組み立てる。
+
+        DDE / CGMP の呼び出し側が ELF の設定探索を自前で書かずに済むようにするための入口。
+        """
+        section = app_config_section(app_config)
+        return cls.load(app_config_path(section), system=system, eval_gate=eval_gate)
 
     @classmethod
     def from_runtime(cls, runtime: Runtime, *, system: str | None = None) -> LLMOps:
