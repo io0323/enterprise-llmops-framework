@@ -45,6 +45,8 @@ class PathsConfig(_Base):
 
 class GatewayConfig(_Base):
     retry_max: int = 2
+    #: Prompt の front matter にも呼び出しにも model が無いときの既定(論理名。絶対ルール12/13)
+    default_model: str = "chat-standard"
     timeout_sec: int = 600
     allow_unpublished: bool = False
     allow_raw_completion: bool = False

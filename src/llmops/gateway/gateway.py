@@ -168,7 +168,7 @@ class Gateway:
 
         duration_ms = int((time.monotonic() - started) * 1000)
         amount = self.cost.resolve_cost(model, response, text)
-        meta: dict[str, Any] = {}
+        meta: dict[str, Any] = dict(req.meta)
         if truncated:
             meta["truncated"] = True
         if amount.estimated:

@@ -170,8 +170,38 @@ fragment 展開の前後どちらかが読み取れない。展開後を採っ�
 
 fragment 自身も `_fragments.<name>` として別途版管理されるので、履歴は失われない。
 
+### N-020 互換shim に DDE 版の `call()` も持たせた
+設計 §5.2 は CGMP 版のシグネチャ(`call_json` / `call_text` / `ensure_budget` /
+`calls_used` / `remaining_calls`)だけを挙げているが、DDE の `LLMClient` は
+`call(prompt, task, batch_size)` という別シグネチャで、`llm/batch.py` の3箇所が使っている。
+Step 1-7 を「import 文の変更だけ」で済ませるには shim が両方を持つ必要がある。
+
+`section_seq`(CGMP)と `batch_size`(DDE)は既存 `llm_logs` の列だった。
+ELF の `spans` には対応列が無いので、`meta_json` に残す(情報を落とさない)。
+
+### N-021 adhoc 呼び出しの既定モデルを `config.yaml` に置いた(`gateway.default_model`)
+互換shim は Prompt 文字列を直接受け取るため、論理モデル名を自分で決める必要がある。
+コードに書くと絶対ルール12(閾値・モデル名をハードコードしない)に反するので設定に置いた。
+優先順位は「呼び出し引数 → アプリ側 config の `llmops.model` → `gateway.default_model`」。
+DDE は `llmops.model: dde-batch` を指定してタイムアウト300秒を維持する(Step 1-7)。
+
+### N-022 `LLMOps.from_runtime(system=...)` は Tracer / Gateway にも system を伝える
+伝えないと `traces.system` と `cost_daily.system` が ELF 自身の名前になり、
+`llmops report cost --by system` が「全部 elf」になって横断観測の目的を満たさない。
+テストで固定した(`test_dde_call_records_system`)。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。
+- **`chat-fallback` が `mock` であることの是非**。`models.yaml` の設計どおり
+  `chat-standard` / `dde-batch` の Fallback 先は `mock`(echo)である。
+  本番で `claude_cli` が落ちると、mock がプロンプトをそのまま返す。JSON 期待の
+  呼び出し(DDE の全3種・CGMP の outline/closing)は `extract_json` が失敗して
+  結局 `AllProvidersFailed` になるので実害は小さいが、本文期待の呼び出し
+  (CGMP の section)は**プロンプトそのものが本文として返る**。`degraded=1` は
+  刻まれるものの、長期テスト中のデータに混入する余地がある。
+  Phase 1 では設計どおりにしてある(FR-014 の受入条件が「mock へ切替わること」のため)。
+  実運用で `degraded` が観測されたら、Fallback 先を「明示的に失敗する Adapter」に
+  変えるか、本文期待の呼び出しだけ Fallback を無効にするかを再検討する。
 - fragment の `includes:` を front matter で明示させるか、本文の `{{ include.x }}` から
   自動解決させるか。Phase 1 は明示(宣言漏れをエラーにできるため)。運用してから再評価する。

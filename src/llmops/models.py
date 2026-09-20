@@ -131,6 +131,8 @@ class CompletionRequest:
     text: str | None = None
     parent_span_id: str | None = None
     attempts: int | None = None
+    #: span の meta_json に残す付帯情報(互換shim の section_seq / batch_size など)
+    meta: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
