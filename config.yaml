@@ -1,0 +1,40 @@
+# ELF 設定。閾値・上限はすべてここから読む(CLAUDE.md 絶対ルール12)。
+system: elf                       # SDK利用時は LLMOps.load(system=...) が優先される
+
+paths:
+  db: "data/llmops.sqlite3"
+  prompts_dir: "prompts"
+  models_file: "models.yaml"
+  evals_dir: "evals"
+  report_dir: "output"
+
+gateway:
+  retry_max: 2                    # 初回+再試行。既存実装(max_retry:1)と等価
+  timeout_sec: 600
+  allow_unpublished: false        # true は開発時のみ。本番 true なら起動時に警告
+  allow_raw_completion: false     # Registry管理外の呼び出し。移行期間のみ true
+  fallback_enabled: true
+
+guard:
+  calls_per_trace_limit: 10       # CGMP 絶対ルール3 を ELF 側で強制
+  hard_quota: true
+
+budget:
+  global_monthly_usd: 20.0
+  warn_percents: [50, 80, 100]
+  # scope 別上限は `llmops budget set` で budgets テーブルへ登録する
+
+trace:
+  record_request_text: true       # 入出力全文記録(CGMP 絶対ルール8 を継承)
+  record_response_text: true
+  max_text_chars: 200000          # 超過分は末尾を切り truncated フラグを立てる
+  strict: false                   # true で記録失敗を送出(テスト用。ELF_STRICT_TRACE でも可)
+
+eval:
+  judge_model: judge
+  regression_tolerance: 0.02      # ベースライン比でこれを超える低下を regressed とする
+  deterministic_first: true       # 決定的評価が落ちたら Judge を呼ばない
+
+logging:
+  level: INFO
+  file: "logs/llmops.log"
