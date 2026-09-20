@@ -30,8 +30,9 @@ LAYERS: dict[str, int] = {
     "sdk": 3,
 }
 
-# どのレイヤからも import してよい共有モジュール(設定・DTO・ログ)。
-SHARED: frozenset[str] = frozenset({"config", "models", "logging_utils"})
+# どのレイヤからも import してよい共有モジュール(設定・DTO・ログ・例外)。
+# errors は adapters も送出するため、gateway ではなくここに置く(NOTES.md N-015)。
+SHARED: frozenset[str] = frozenset({"config", "models", "logging_utils", "errors"})
 
 # adapters は SPI のみ。llmops の他サブパッケージを一切 import しない(絶対ルール8)。
 ADAPTERS = "adapters"
@@ -119,9 +120,17 @@ def test_package_skeleton_exists() -> None:
 
 
 def test_adapters_import_only_spi() -> None:
-    """adapters は gateway / prompt / registry / db / sdk 等を import しない(絶対ルール8)。"""
+    """adapters は gateway / prompt / registry / db / sdk 等を import しない(絶対ルール8)。
+
+    共有モジュール(`errors` / `logging_utils` 等)は許可する。Adapter は
+    `AdapterError` を送出し WARN ログを出す必要があり、そこを禁じると各 Adapter が
+    独自の例外型を持つことになって、呼び出し側の `except LLMError` が壊れる。
+    禁止したいのは「上位レイヤへの依存」であって共有語彙の利用ではない。
+    """
     violations = [
-        f"{path}: llmops.{dst}" for src, dst, path in _edges() if src == ADAPTERS
+        f"{path}: llmops.{dst}"
+        for src, dst, path in _edges()
+        if src == ADAPTERS and dst not in SHARED
     ]
     assert not violations, "adapters が上位レイヤを import している:\n" + "\n".join(violations)
 

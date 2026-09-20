@@ -44,6 +44,12 @@ python_version = "3.11"
 strict = true
 files = ["src/llmops"]
 
+[[tool.mypy.overrides]]
+# optional extra `sdk-anthropic`。未インストール環境(CI含む)で型検査を落とさない。
+# Adapter は SDK を遅延 import し、未解決は実行時に AdapterUnavailable にする
+module = ["anthropic"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 # CLAUDE.md のカバレッジ規定は gateway / prompt / registry の3つ。計測対象をそこに絞る。
 # llmops 全体を対象にすると、Phase 1 では空のままの eval/ governance/ を埋めるためだけの

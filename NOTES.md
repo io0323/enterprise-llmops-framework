@@ -103,6 +103,47 @@ CLAUDE.md の規定は「`gateway` / `prompt` / `registry` は行カバレッジ
 ELF 自身の DB であり、既存5システムのスキーマではない(絶対ルール1の対象外)。
 Phase 2-3 のテーブルを先に作ったのと同じ理由で、後からの ALTER を避けるため今入れた。
 
+### N-014 `strip_fence` / `extract_json` は CGMP 版を移植した(DDE 版ではない)
+実装指示(`docs/impl/phase1_core.md` Step 1-2)の指定どおり CGMP 版を採った。
+DDE 版との差分は2点あり、いずれも CGMP 版が上位互換である:
+
+| 箇所 | CGMP 版(採用) | DDE 版 |
+|---|---|---|
+| フェンス正規表現 | ` ```(?:json\|markdown\|md)? ` | ` ```(?:json)? ` |
+| 最外ブロックの探索順 | `{}` → `[]` | `[]` → `{}` |
+
+探索順は、説明文に `{` と `[` の両方が混ざるときだけ結果が変わる。DDE の3プロンプトは
+いずれも JSON 配列を返すが、オブジェクト断片が先に現れる応答では挙動差が出る可能性がある。
+Step 1-7 の移行時に、DDE の既存テストが通ることで実挙動を確認する。
+**先回りして修正しない**(絶対ルール10。改善は評価スイートができてから)。
+
+### N-015 例外階層の実体を `llmops/errors.py` に置いた(`gateway/errors.py` は再輸出)
+設計 §4 のモジュール表では `gateway/errors.py` が実体だが、`adapters/*` が
+`AdapterError` を送出する必要があり、そこから `gateway` を import すると
+モジュール依存の絶対規約(絶対ルール8)に反する。
+実体を共有モジュール `llmops/errors.py` に置き、`gateway/errors.py` は同じクラスを
+再輸出するだけにした。設計書どおりの import パスも生きたまま、依存の向きも守れる。
+
+これに伴い `tests/test_layering.py` の「adapters は他を import しない」判定を、
+共有モジュール(`config` / `models` / `logging_utils` / `errors`)は許可する形に緩めた。
+禁止したいのは上位レイヤへの依存であって、共有語彙の利用ではない。
+Adapter に独自例外を持たせると、呼び出し側の `except LLMError` が壊れる。
+
+### N-016 設計 §10 に無い例外を2つ足した
+- `AdapterUnavailable`(`AdapterError` の下): optional extra 未インストール・未知の
+  adapter 名・環境変数未設定を「解決時」に失敗させる。Step 1-2 が要求する。
+  `AdapterError` の下に置いたので既存の `except LLMError` がそのまま効く。
+- `PolicyViolation`(`LLMOpsError` の下): Step 1-5 の `complete_raw()` が
+  `allow_raw_completion: false` のときに送出する。
+
+### N-017 `LLMBudgetExceeded` を `QuotaExceeded` と `LLMError` の両方から継承させた
+設計 §10 では `QuotaExceeded` の下にのみ置かれている。しかし既存 CGMP は
+`class LLMBudgetExceeded(LLMError)` であり、`except LLMError` でも捕捉されていた。
+ELF 側で `LLMError` を外すと、移行後に既存の捕捉が素通りして挙動が変わる
+(絶対ルール: 既存を壊さない)。多重継承で両方を満たす。
+
+同じ理由で `LLMOpsError` の基底を `RuntimeError` にした(既存 `LLMError(RuntimeError)` 互換)。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。
