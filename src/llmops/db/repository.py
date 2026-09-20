@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from llmops.db.connection import connect, init_schema
-from llmops.models import PromptVersionRow, SpanEnd, SpanStart, TraceStart
+from llmops.models import ModelVersionRow, PromptVersionRow, SpanEnd, SpanStart, TraceStart
 
 
 def utcnow() -> str:
@@ -396,3 +396,106 @@ class Repository:
                 "SELECT * FROM audit_logs WHERE event = ? ORDER BY id DESC LIMIT ?", (event, limit)
             ).fetchall()
         return list(rows)
+
+    # ------------------------------------------------------------------
+    # model_versions
+    # ------------------------------------------------------------------
+    def insert_model_version(self, model: ModelVersionRow) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO model_versions (
+                logical_name, version, adapter, params_json, price_json,
+                fallback_to, status, config_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model.logical_name,
+                model.version,
+                model.adapter,
+                model.params_json,
+                model.price_json,
+                model.fallback_to,
+                model.status,
+                model.config_hash,
+                utcnow(),
+            ),
+        )
+        self.conn.commit()
+
+    def latest_model_version(self, logical_name: str) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM model_versions WHERE logical_name = ? ORDER BY version DESC LIMIT 1",
+            (logical_name,),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def get_model_version(self, logical_name: str, version: int) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM model_versions WHERE logical_name = ? AND version = ?",
+            (logical_name, version),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def list_model_versions(self, logical_name: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM model_versions WHERE logical_name = ? ORDER BY version",
+                (logical_name,),
+            ).fetchall()
+        )
+
+    def list_models(self) -> list[sqlite3.Row]:
+        """論理モデル名ごとの最新版。"""
+        return list(
+            self.conn.execute(
+                """
+                SELECT mv.* FROM model_versions mv
+                  JOIN (SELECT logical_name, MAX(version) AS version
+                          FROM model_versions GROUP BY logical_name) latest
+                    ON mv.logical_name = latest.logical_name AND mv.version = latest.version
+                 ORDER BY mv.logical_name
+                """
+            ).fetchall()
+        )
+
+    # ------------------------------------------------------------------
+    # budgets
+    # ------------------------------------------------------------------
+    def upsert_budget(
+        self,
+        *,
+        budget_id: str,
+        scope: str,
+        period: str,
+        limit_usd: float,
+        hard_limit: bool = True,
+        warn_percents: str = "[50,80,100]",
+        enabled: bool = True,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO budgets (id, scope, period, limit_usd, hard_limit, warn_percents, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                scope = excluded.scope, period = excluded.period,
+                limit_usd = excluded.limit_usd, hard_limit = excluded.hard_limit,
+                warn_percents = excluded.warn_percents, enabled = excluded.enabled
+            """,
+            (
+                budget_id,
+                scope,
+                period,
+                limit_usd,
+                1 if hard_limit else 0,
+                warn_percents,
+                1 if enabled else 0,
+            ),
+        )
+        self.conn.commit()
+
+    def get_budget(self, budget_id: str) -> sqlite3.Row | None:
+        row = self.conn.execute("SELECT * FROM budgets WHERE id = ?", (budget_id,)).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def list_budgets(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM budgets ORDER BY id").fetchall())

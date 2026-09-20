@@ -16,7 +16,11 @@ import typer
 from llmops.config import Config, load_config
 from llmops.db.connection import table_names
 from llmops.db.repository import Repository
+from llmops.errors import LLMOpsError
+from llmops.gateway import Runtime
 from llmops.logging_utils import get_logger, setup_logging
+from llmops.models import CompletionRequest
+from llmops.observability.tracer import new_id
 from llmops.prompt import catalog as prompt_catalog
 from llmops.prompt.registry import PromptRegistry
 
@@ -32,7 +36,9 @@ app = typer.Typer(
 prompt_app = typer.Typer(
     name="prompt", help="Prompt 資産の一覧・表示・状態遷移", no_args_is_help=True
 )
+model_app = typer.Typer(name="model", help="論理モデルの一覧・疎通確認", no_args_is_help=True)
 app.add_typer(prompt_app)
+app.add_typer(model_app)
 
 CONFIG_OPTION = typer.Option(None, "--config", help="config.yaml のパス")
 
@@ -113,18 +119,23 @@ def init(config_path: str | None = CONFIG_OPTION) -> None:
 
 @app.command()
 def sync(config_path: str | None = CONFIG_OPTION) -> None:
-    """prompts/**/*.md を DB へ取り込む(content_hash の差分で新 version を採番)。"""
+    """prompts/**/*.md と models.yaml を DB へ取り込む(ハッシュ差分で新 version を採番)。"""
     config = _load(config_path)
-    repo = _open(config)
+    runtime = Runtime.build(config)
     try:
-        results = _registry(config, repo).sync(actor=config.system)
+        prompts = runtime.prompts.sync(actor=config.system)
+        models = runtime.models.sync()
     finally:
-        repo.close()
+        runtime.close()
 
-    created = [r for r in results if r.action == "created"]
-    for result in results:
+    for result in prompts:
         typer.echo(f"{result.action:9} {result.prompt_id}@{result.version} ({result.status})")
-    typer.echo(f"prompts: {len(results)} 件 / 新 version: {len(created)} 件")
+    for model in models:
+        typer.echo(f"{model.action:9} model {model.logical_name}@{model.version}")
+    typer.echo(
+        f"prompts: {len(prompts)} 件(新 version {sum(r.action == 'created' for r in prompts)})"
+        f" / models: {len(models)} 件(新 version {sum(m.action == 'created' for m in models)})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,3 +347,120 @@ def prompt_canary(
 
 if __name__ == "__main__":  # pragma: no cover
     app()
+
+
+# ---------------------------------------------------------------------------
+# model サブコマンド
+# ---------------------------------------------------------------------------
+
+
+@model_app.command("list")
+def model_list(config_path: str | None = CONFIG_OPTION) -> None:
+    """論理モデル名の一覧(名前ごとの最新版)。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        models = runtime.models.list_all()
+    finally:
+        runtime.close()
+
+    if not models:
+        typer.echo("モデルが登録されていません(`llmops sync` を実行してください)")
+        return
+    for model in models:
+        fallback = "" if model.fallback_to is None else f" → fallback={model.fallback_to}"
+        typer.echo(
+            f"{model.logical_name}@{model.version} adapter={model.adapter} "
+            f"({model.status}){fallback}"
+        )
+
+
+@model_app.command("show")
+def model_show(logical_name: str, config_path: str | None = CONFIG_OPTION) -> None:
+    """1つの論理モデルの解決内容。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        model = runtime.models.resolve(logical_name)
+    finally:
+        runtime.close()
+
+    typer.echo(f"{model.logical_name}@{model.version} ({model.status})")
+    typer.echo(f"adapter: {model.adapter}")
+    typer.echo(f"params: {json.dumps(model.params, ensure_ascii=False)}")
+    typer.echo(f"price: {json.dumps(model.price, ensure_ascii=False)}")
+    typer.echo(f"fallback_to: {model.fallback_to}")
+
+
+@model_app.command("health")
+def model_health(config_path: str | None = CONFIG_OPTION) -> None:
+    """全 Adapter の疎通確認。LLM は呼ばない(コストゼロ)。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    failed = 0
+    try:
+        for model in runtime.models.list_all():
+            try:
+                healthy = runtime.gateway.adapter(model.adapter).health()
+            except LLMOpsError as exc:
+                healthy = False
+                typer.echo(f"NG   {model.logical_name} ({model.adapter}): {exc}")
+                failed += 1
+                continue
+            mark = "OK  " if healthy else "NG  "
+            failed += 0 if healthy else 1
+            typer.echo(f"{mark} {model.logical_name} ({model.adapter})")
+    finally:
+        runtime.close()
+    if failed:
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# run(動作確認・アドホック実行)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def run(
+    prompt_id: str,
+    vars_file: str | None = typer.Option(None, "--vars", help="変数を入れた JSON ファイル"),
+    model: str | None = typer.Option(None, "--model", help="論理モデル名(既定は front matter)"),
+    version: int | None = typer.Option(None, "--version"),
+    task: str | None = typer.Option(None, "--task"),
+    as_json: bool = typer.Option(False, "--json", help="応答を JSON として解釈する"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """Prompt を1回実行する(trace 1件 + span N件が記録される)。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    trace_id = new_id()
+    try:
+        runtime.tracer.start_trace("cli.run", external_id=prompt_id, trace_id=trace_id)
+        try:
+            result = runtime.gateway.complete(
+                CompletionRequest(
+                    trace_id=trace_id,
+                    task=task or prompt_id.split(".")[-1],
+                    prompt_id=prompt_id,
+                    variables=_load_vars(vars_file),
+                    model=model,
+                    version=version,
+                    as_json=as_json,
+                )
+            )
+        except Exception:
+            runtime.tracer.end_trace(trace_id, status="failed")
+            raise
+        runtime.tracer.end_trace(trace_id, status="success")
+    finally:
+        runtime.close()
+
+    typer.echo(result.text)
+    typer.echo(
+        f"\n--- {result.prompt_id}@{result.prompt_version} model={result.logical_model} "
+        f"span={result.span_id} cost={result.cost_usd} "
+        f"in={result.input_tokens} out={result.output_tokens} "
+        f"{result.duration_ms}ms degraded={result.degraded}"
+    )
+    typer.echo(f"--- trace: {trace_id}")

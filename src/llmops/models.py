@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -88,3 +89,69 @@ class PromptVersionRow:
     var_schema: str | None = None
     owner: str | None = None
     note: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Model Registry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ModelVersionRow:
+    """`model_versions` の1行。"""
+
+    logical_name: str
+    version: int
+    adapter: str
+    params_json: str
+    config_hash: str
+    price_json: str | None = None
+    fallback_to: str | None = None
+    status: str = "active"
+
+
+# ---------------------------------------------------------------------------
+# Gateway の入出力(設計 §5.1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CompletionRequest:
+    """Gateway への1リクエスト。`prompt_id` が None のときは adhoc(Registry 管理外)。"""
+
+    trace_id: str
+    task: str
+    prompt_id: str | None = None
+    variables: Mapping[str, Any] = field(default_factory=dict)
+    model: str | None = None
+    version: int | None = None
+    as_json: bool = False
+    no_fallback: bool = False
+    degraded: bool = False
+    text: str | None = None
+    parent_span_id: str | None = None
+    attempts: int | None = None
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    """Gateway の戻り(設計 §5.1)。"""
+
+    text: str
+    span_id: str
+    logical_model: str
+    duration_ms: int
+    prompt_id: str | None = None
+    prompt_version: int | None = None
+    render_hash: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
+    degraded: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+    parsed: Any = None
+
+    @property
+    def json(self) -> Any:
+        """`as_json=True` で呼んだときのパース結果(設計 §5.1 の利用例に合わせる)。"""
+        return self.parsed
