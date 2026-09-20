@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Mapping
 from typing import Any
 
@@ -95,6 +96,9 @@ class LLMClient:
         self.model = model or section.get("model") or self.ops.config.gateway.default_model
         #: request_id → trace_id。呼び出し回数は trace 単位で数える
         self._traces: dict[str | None, str] = {}
+        #: 自分が**新しく作った** trace(プロセス終了時に閉じる対象)
+        self._opened: set[str] = set()
+        atexit.register(self.finish_open_traces)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -143,14 +147,52 @@ class LLMClient:
                 if request_id is None
                 else self.ops.runtime.repo.find_trace_by_external_id(self.system, request_id)
             )
-            self._traces[request_id] = (
-                str(existing["id"])
-                if existing is not None
-                else self.ops.runtime.tracer.start_trace(
+            if existing is not None:
+                self._traces[request_id] = str(existing["id"])
+            else:
+                trace_id = self.ops.runtime.tracer.start_trace(
                     self.operation, external_id=request_id
                 )
-            )
+                self._traces[request_id] = trace_id
+                self._opened.add(trace_id)
         return self._traces[request_id]
+
+    def finish(self, request_id: str | None, status: str | None = None) -> None:
+        """この request_id の trace を閉じる(`finished_at` と status を確定させる)。
+
+        `status` 省略時は span の成否から導出する。
+        呼び忘れても**プロセス終了時に自動で閉じる**(`atexit`)。
+        既存 `LLMClient` には無かったメソッドなので、呼び出し側の変更は任意。
+        """
+        trace_id = self._traces.get(request_id)
+        if trace_id is None or trace_id not in self._opened:
+            return
+        self.ops.runtime.tracer.end_trace(trace_id, status=status or self._derive(trace_id))
+        self._opened.discard(trace_id)
+
+    def finish_open_traces(self) -> None:
+        """未確定の trace を全て閉じる。CLI バッチの終了時に効く。"""
+        for trace_id in list(self._opened):
+            try:
+                self.ops.runtime.tracer.end_trace(trace_id, status=self._derive(trace_id))
+            except Exception as exc:  # noqa: BLE001 - 終了処理で落とさない
+                logger.warning("trace の終了記録に失敗しました: %s", exc)
+            self._opened.discard(trace_id)
+
+    def _derive(self, trace_id: str) -> str:
+        """span の成否から trace の status を決める。
+
+        全部成功なら success、一部でも失敗していれば partial。
+        「失敗した試行が1つでもあったか」を残すのが目的で、
+        アプリ側の完了判定(CGMP の runs.status など)とは別物。
+        """
+        try:
+            total, ok = self.ops.runtime.repo.span_outcome(trace_id)
+        except Exception:  # noqa: BLE001 - 導出に失敗しても閉じる
+            return "success"
+        if total == 0 or total == ok:
+            return "success"
+        return "partial"
 
     # ------------------------------------------------------------------
     # 呼び出し回数(CGMP 絶対ルール3)

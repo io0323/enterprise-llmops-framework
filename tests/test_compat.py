@@ -298,3 +298,67 @@ def test_model_comes_from_app_config(raw_runtime: Runtime, repo: Repository) -> 
         ops=LLMOps.from_runtime(raw_runtime, system="dde"),
     )
     assert client.model == "mock-json"
+
+
+# ---------------------------------------------------------------------------
+# trace の確定(status / finished_at)
+# ---------------------------------------------------------------------------
+
+
+def test_finish_closes_the_trace(client: LLMClient, repo: Repository) -> None:
+    client.call_text("a", task="section", request_id="req-1")
+    trace_id = client._traces["req-1"]
+    assert repo.get_trace(trace_id)["status"] == "running"
+
+    client.finish("req-1")
+
+    row = repo.get_trace(trace_id)
+    assert row["status"] == "success"
+    assert row["finished_at"] is not None
+
+
+def test_finish_marks_partial_when_a_span_failed(
+    raw_runtime: Runtime, repo: Repository
+) -> None:
+    """失敗した試行が1つでもあれば partial(週次で失敗コストを追えるように)。"""
+    client = LLMClient.from_runtime(raw_runtime, system="cgmp", model="mock-echo")
+    client.call_text("a", task="section", request_id="req-1")
+    with pytest.raises(LLMError):
+        client.call_json("JSONではない", task="outline", request_id="req-1")
+
+    client.finish("req-1")
+    assert repo.get_trace(client._traces["req-1"])["status"] == "partial"
+
+
+def test_finish_open_traces_closes_everything(client: LLMClient, repo: Repository) -> None:
+    """呼び忘れても、プロセス終了時にこれが走って未確定を残さない。"""
+    client.call_text("a", task="section", request_id="req-1")
+    client.call_text("b", task="section", request_id="req-2")
+
+    client.finish_open_traces()
+
+    for request_id in ("req-1", "req-2"):
+        assert repo.get_trace(client._traces[request_id])["status"] == "success"
+
+
+def test_finish_does_not_touch_traces_it_did_not_open(
+    raw_runtime: Runtime, repo: Repository
+) -> None:
+    """既にある trace を再利用した場合、閉じるのは開いた側の責任にする。"""
+    first = LLMClient.from_runtime(raw_runtime, system="cgmp", model="mock-echo")
+    first.call_text("a", task="section", request_id="req-1")
+
+    second = LLMClient.from_runtime(raw_runtime, system="cgmp", model="mock-echo")
+    second.call_text("b", task="section", request_id="req-1")
+    second.finish("req-1")
+
+    assert repo.get_trace(first._traces["req-1"])["status"] == "running"
+
+
+def test_operation_name_comes_from_config(raw_runtime: Runtime, repo: Repository) -> None:
+    """trace の名前をアプリ側で決められること(N-031)。"""
+    client = LLMClient.from_runtime(
+        raw_runtime, system="cgmp", model="mock-echo", operation="article.generate"
+    )
+    client.call_text("a", task="section", request_id="req-1")
+    assert repo.get_trace(client._traces["req-1"])["operation"] == "article.generate"

@@ -540,6 +540,15 @@ class Repository:
         params.append(limit)
         return list(self.conn.execute(sql, params).fetchall())
 
+    def span_outcome(self, trace_id: str) -> tuple[int, int]:
+        """(span 総数, 成功した span 数)。trace の status を導出するのに使う。"""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(success), 0) AS ok"
+            " FROM spans WHERE trace_id = ?",
+            (trace_id,),
+        ).fetchone()
+        return int(row["total"]), int(row["ok"])
+
     def find_trace_by_external_id(self, system: str, external_id: str) -> sqlite3.Row | None:
         """system + external_id で trace を引く(1記事 = 1 trace を跨プロセスで保つため)。"""
         row = self.conn.execute(

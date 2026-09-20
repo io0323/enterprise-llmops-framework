@@ -308,6 +308,22 @@ CGMP は `article.generate` を使う。これで:
 **教訓**: 記録の名前が全部同じだと、記録を消す操作が危険になる。
 観測基盤は「後から選別できる」ことまで含めて設計する必要がある。
 
+### N-032 互換shim が開いた trace をプロセス終了時に閉じる
+実データの確認で、CGMP の trace が `status=running` / `finished_at=NULL` のまま
+残ることが判った。shim は span 記録のために trace を自動で作るが、
+「記事の生成が終わった」ことを知る手段が無いため閉じられなかった。
+
+`llmops trace list --status failed`(運用ガイド §2 の週次ルーチン)が
+機能しないので、`atexit` で未確定の trace を閉じるようにした。
+DDE も CGMP も CLI バッチなので、プロセス終了 = 処理の終わりで妥当。
+
+status は span の成否から導出する(全部成功なら success、1つでも失敗していれば partial)。
+アプリ側の完了判定(CGMP の `runs.status` など)とは別物であることを docstring に明記した。
+明示的に閉じたい場合は `llm.finish(request_id, status)` を呼ぶ。
+
+常駐プロセス(Harness)は `ops.trace()` のコンテキストマネージャを使うため、
+この経路には乗らない。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。
