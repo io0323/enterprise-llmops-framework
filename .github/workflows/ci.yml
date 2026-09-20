@@ -9,8 +9,6 @@ jobs:
         with: {python-version: "3.11"}
       - run: pip install -e ".[dev,eval]"
       - run: ruff check src tests
-      - name: mypy
-        # Phase 1 完了時に continue-on-error を外す(docs/impl/phase0_bootstrap.md Step 0-4)
-        continue-on-error: true
-        run: mypy src/llmops
+      # Phase 1 完了により continue-on-error を外した(docs/impl/phase0_bootstrap.md Step 0-4)
+      - run: mypy src/llmops
       - run: pytest -q --cov --cov-report=term-missing
