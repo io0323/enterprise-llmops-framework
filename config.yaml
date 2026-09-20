@@ -13,8 +13,8 @@ gateway:
   default_model: chat-standard    # front matter にも呼び出しにも model が無いときの既定(論理名)
   timeout_sec: 600
   allow_unpublished: false        # true は開発時のみ。本番 true なら起動時に警告
-  allow_raw_completion: true      # 移行期間のみ true(Phase 1 Step 1-7/1-8 の shim 経路)
-                                  # Prompt 外部化が終わったら false に戻す(docs/05 §6 のリスク表)
+  allow_raw_completion: false     # Registry管理外の呼び出し。移行期間のみ true
+                                  # DDE / CGMP の Prompt 外部化が終わったので false へ戻した
   fallback_enabled: true
 
 guard:

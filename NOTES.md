@@ -256,6 +256,44 @@ FR-014(Provider失敗時のFallback)は Gateway の機能として実装済み�
 いずれも「シグネチャが同じでテストが通る」だけでは見つからない。
 **既存テストをそのまま通すことが最も確実な検出手段だった。**
 
+### N-028 互換shim に Registry 版の `complete_json` / `complete_text` を足した
+CGMP の移行 Step 2 で、呼び出し側を `prompt_id` 指定に切り替える必要がある。
+DDE は `LLMOps` へ乗り換えたが、CGMP は記事単位の呼び出し枠管理
+(`calls_used` / `ensure_budget` / `call_limit`)を `LLMClient` に依存しており、
+`LLMOps` へ移すとその accounting を CGMP 側に作り直すことになる。
+
+そこで shim に Registry 版の入口を足した。`call_json` / `call_text`
+(Prompt 文字列を直接渡す移行用の入口。span に版が刻まれない)は残し、
+新しい呼び出しは `complete_json` / `complete_text` を使う。
+
+結果として CGMP の差分は「Prompt 組み立て → 変数辞書」の置き換えだけになり、
+呼び出し枠の扱いは1行も変わっていない。`allow_raw_completion` は
+両システムの Prompt 外部化が終わった時点で `false` に戻した。
+
+### N-029 CGMP の `prompts/cgmp/*.md` はセンチネル置換で機械生成した
+CGMP の Prompt は f-string の中に条件分岐と関数呼び出しが混ざっており、
+DDE のような機械変換(`{x}` → `{{ x }}`)ができない。手で書き写すと差分が入る。
+
+そこで **現行関数にセンチネル値を渡して出力を得て、そのセンチネルを
+`{{ 変数 }}` / `{{ include.断片 }}` へ置換する**方法を採った。
+生成スクリプトは使い捨て(移行は1回きりなのでリポジトリに残さない)。
+正しさの保証はゴールデンのバイト一致テスト(`tests/test_golden_prompts.py`)。
+
+分岐の扱い:
+- `{CONTEXT_RULE if contexts else ""}` → **Prompt を2つに分けた**
+  (`cgmp.section` / `cgmp.section_no_context`)。設計 §3.2「分岐が要るなら Prompt を分ける」
+  片方だけ直す事故を防ぐため、2ファイルが context_rule 以外で一致することもテストしている
+- `term_rule()` / `tone_rule()` → 引数で文面が変わるので fragment にできない。
+  CGMP 側(`llm/variables.py`)に残し、通常の変数として渡す(N-008 / docs/05 §2.2)
+
+### N-030 fragment 展開時にファイル末尾の改行を落とす
+fragment は本文の行中に差し込まれる断片なので、ファイル末尾の改行を残すと
+参照元に空行が1つ増える。CGMP のゴールデン検証で全 Prompt が1バイト違いで落ちて発覚した。
+`PromptRegistry.sync` で `rstrip("\n")` する。
+
+DDE のときに見つけた「本文末尾の改行を落としていた」(N-024)と合わせて、
+**ゴールデン検証は移行基盤自体のバグを2件検出した。**
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

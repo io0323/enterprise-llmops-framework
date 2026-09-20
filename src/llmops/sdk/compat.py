@@ -171,7 +171,7 @@ class LLMClient:
         self, prompt: str, task: str, request_id: str | None = None, section_seq: int | None = None
     ) -> Any:
         """JSON応答を期待する呼び出し。"""
-        result = self._call(prompt, task, request_id, section_seq, as_json=True, retry=True)
+        result = self._call_raw(prompt, task, request_id, section_seq, as_json=True, retry=True)
         return result.json
 
     def call_text(
@@ -183,7 +183,76 @@ class LLMClient:
         retry: bool = True,
     ) -> str:
         """Markdown本文を期待する呼び出し。"""
-        return self._call(prompt, task, request_id, section_seq, as_json=False, retry=retry).text
+        result = self._call_raw(
+            prompt, task, request_id, section_seq, as_json=False, retry=retry
+        )
+        return result.text
+
+    # ------------------------------------------------------------------
+    # Registry 管理の Prompt を使う呼び出し(移行 Step 2 以降)
+    #
+    # `call_json` / `call_text` は Prompt 文字列を直接受け取る**移行用**の入口で、
+    # span に版が刻まれない。こちらは prompt_id を渡すので版・render_hash が残る。
+    # 呼び出し回数の管理(CGMP 絶対ルール3)は従来どおり本クラスが担う(NOTES.md N-028)。
+    # ------------------------------------------------------------------
+    def complete_json(
+        self,
+        prompt_id: str,
+        variables: Mapping[str, Any],
+        task: str,
+        request_id: str | None = None,
+        section_seq: int | None = None,
+        retry: bool = True,
+        version: int | None = None,
+    ) -> Any:
+        """JSON応答を期待する呼び出し(`call_json` の Registry 版)。"""
+        return self._complete(
+            prompt_id, variables, task, request_id, section_seq,
+            as_json=True, retry=retry, version=version,
+        ).json
+
+    def complete_text(
+        self,
+        prompt_id: str,
+        variables: Mapping[str, Any],
+        task: str,
+        request_id: str | None = None,
+        section_seq: int | None = None,
+        retry: bool = True,
+        version: int | None = None,
+    ) -> str:
+        """Markdown本文を期待する呼び出し(`call_text` の Registry 版)。"""
+        return self._complete(
+            prompt_id, variables, task, request_id, section_seq,
+            as_json=False, retry=retry, version=version,
+        ).text
+
+    def _complete(
+        self,
+        prompt_id: str,
+        variables: Mapping[str, Any],
+        task: str,
+        request_id: str | None,
+        section_seq: int | None,
+        *,
+        as_json: bool,
+        retry: bool,
+        version: int | None,
+    ) -> CompletionResult:
+        attempts = self.ops.config.gateway.retry_max if retry else 1
+        if request_id is not None:
+            self.ensure_budget(request_id, needed=attempts)
+        meta = {} if section_seq is None else {"section_seq": section_seq}
+        return self.ops.complete(
+            prompt_id=prompt_id,
+            variables=variables,
+            task=task,
+            as_json=as_json,
+            retry=retry,
+            version=version,
+            trace_id=self._trace_id(request_id),
+            meta=meta,
+        )
 
     # ------------------------------------------------------------------
     # 呼び出し(DDE 互換)
@@ -193,13 +262,13 @@ class LLMClient:
 
         `batch_size` は既存では llm_logs の列だった。ELF では span の meta_json に残す。
         """
-        result = self._call(
+        result = self._call_raw(
             prompt, task, None, None, as_json=True, retry=True, batch_size=batch_size
         )
         return result.json
 
     # ------------------------------------------------------------------
-    def _call(
+    def _call_raw(
         self,
         prompt: str,
         task: str,

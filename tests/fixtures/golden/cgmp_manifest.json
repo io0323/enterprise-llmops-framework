@@ -1,0 +1,98 @@
+[
+  {
+    "name": "cgmp_outline",
+    "prompt_id": "cgmp.outline",
+    "variables": {
+      "target": "初心者",
+      "topic": "Claude Code 副業",
+      "intent": "比較",
+      "seo_intent": "Buy",
+      "platform": "note",
+      "evidence": "{\n  \"urls\": [\n    \"https://example.com/a\"\n  ],\n  \"keywords\": [\n    \"副業\",\n    \"単価\"\n  ]\n}",
+      "template_name": "購入検討型",
+      "skeleton": "1. 導入\n2. 本題",
+      "title_count": 3,
+      "title_max_len": 32,
+      "max_sections": 5,
+      "ai_smell_phrases": "「いかがでしたか」、「まとめると」"
+    }
+  },
+  {
+    "name": "cgmp_section",
+    "prompt_id": "cgmp.section",
+    "variables": {
+      "target": "初心者",
+      "topic": "Claude Code 副業",
+      "intent": "比較",
+      "title": "Claude Code 副業の始め方",
+      "outline_all": "   1. 全体像 (前提, 流れ)\n→ 2. 料金と時間 (初期費用)",
+      "section_heading": "料金と時間",
+      "points": "- 初期費用",
+      "context": "事実A(出典: 別記事)\n\n事実B",
+      "tone_rule": "- **文体はだ・である調で統一する(厳守)。** 文末は「〜だ。」「〜である。」「〜する。」(例: 制度上、複数回の寄付は可能だ。)\n  1文でもです・ます調を混ぜない。箇条書き・表の中の文・FAQの回答も同じ文体にする",
+      "term_rule": "- **次の語は指定した表記で統一する: 「Claude Code」(×「claude code」)。** 括弧内の表記は使わない。\n  1記事の中で同じ語を2通りに書き分けない",
+      "previous_ref": "「全体像」",
+      "target_chars": 1200,
+      "ai_smell_phrases": "「いかがでしたか」、「まとめると」"
+    }
+  },
+  {
+    "name": "cgmp_section_no_context",
+    "prompt_id": "cgmp.section_no_context",
+    "variables": {
+      "target": "初心者",
+      "topic": "Claude Code 副業",
+      "intent": "比較",
+      "title": "Claude Code 副業の始め方",
+      "outline_all": "→ 1. 全体像 (前提, 流れ)\n   2. 料金と時間 (初期費用)",
+      "section_heading": "全体像",
+      "points": "- 前提\n- 流れ",
+      "context": "(参照可能な事実なし)",
+      "tone_rule": "- **文体はだ・である調で統一する(厳守)。** 文末は「〜だ。」「〜である。」「〜する。」(例: 制度上、複数回の寄付は可能だ。)\n  1文でもです・ます調を混ぜない。箇条書き・表の中の文・FAQの回答も同じ文体にする",
+      "term_rule": "",
+      "previous_ref": "",
+      "target_chars": 1200,
+      "ai_smell_phrases": "「いかがでしたか」、「まとめると」"
+    }
+  },
+  {
+    "name": "cgmp_closing",
+    "prompt_id": "cgmp.closing",
+    "variables": {
+      "target": "初心者",
+      "topic": "Claude Code 副業",
+      "title": "Claude Code 副業の始め方",
+      "faq_block": "[\n  {\n    \"question\": \"無料で使えますか\",\n    \"answer_hint\": \"プラン次第\"\n  }\n]",
+      "cta_block": "[\n  \"まずは無料で試す\"\n]",
+      "body_md": "## 全体像\n本文テキスト。\n\n## 料金と時間\nもう少し本文。\n",
+      "tone_rule": "- **文体はだ・である調で統一する(厳守)。** 文末は「〜だ。」「〜である。」「〜する。」(例: 制度上、複数回の寄付は可能だ。)\n  1文でもです・ます調を混ぜない。箇条書き・表の中の文・FAQの回答も同じ文体にする",
+      "term_rule": "- **次の語は指定した表記で統一する: 「Claude Code」(×「claude code」)。** 括弧内の表記は使わない。\n  1記事の中で同じ語を2通りに書き分けない",
+      "meta_description_max": 120,
+      "ai_smell_phrases": "「いかがでしたか」、「まとめると」"
+    }
+  },
+  {
+    "name": "cgmp_rubric",
+    "prompt_id": "cgmp.rubric",
+    "variables": {
+      "topic": "Claude Code 副業",
+      "target": "初心者",
+      "structure": "1. 全体像\n2. 料金と時間",
+      "body_md": "## 全体像\n本文テキスト。\n\n## 料金と時間\nもう少し本文。\n"
+    }
+  },
+  {
+    "name": "cgmp_sns_summary",
+    "prompt_id": "cgmp.sns_summary",
+    "variables": {
+      "title": "Claude Code 副業の始め方",
+      "topic": "Claude Code 副業",
+      "summary": "要約テキスト",
+      "excerpt": "全体像\n本文テキスト。\n\n料金と時間\nもう少し本文。",
+      "x_short_limit": 120,
+      "x_long_limit": 480,
+      "threads_limit": 500,
+      "max_hashtags": 5
+    }
+  }
+]

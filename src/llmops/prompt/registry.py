@@ -118,8 +118,10 @@ class PromptRegistry:
         fragment を変更すると、展開後テキストが変わるため参照元にも新 version が出る。
         """
         prompt_set = loader.load_dir(self.prompts_dir)
+        # fragment は本文へ**行中に**差し込まれる断片。ファイル末尾の改行はファイルの
+        # 体裁であって内容ではないので落とす(残すと参照元に空行が1つ増える)。
         fragments = {
-            prompt_id[len(loader.FRAGMENT_PREFIX) :]: file.body
+            prompt_id[len(loader.FRAGMENT_PREFIX) :]: file.body.rstrip("\n")
             for prompt_id, file in prompt_set.fragments.items()
         }
 
