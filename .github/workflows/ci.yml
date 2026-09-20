@@ -13,4 +13,4 @@ jobs:
         # Phase 1 完了時に continue-on-error を外す(docs/impl/phase0_bootstrap.md Step 0-4)
         continue-on-error: true
         run: mypy src/llmops
-      - run: pytest -q --cov=llmops --cov-report=term-missing
+      - run: pytest -q --cov --cov-report=term-missing

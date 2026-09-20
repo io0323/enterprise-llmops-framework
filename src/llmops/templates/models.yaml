@@ -1,0 +1,59 @@
+# 論理モデル定義。実モデル名・Provider製品名をここに書かない(CLAUDE.md 絶対ルール13)。
+# 内容を変更すると config_hash が変わり、llmops sync が自動で新 version を採番する。
+models:
+  chat-standard:
+    adapter: claude_cli
+    params:
+      command: ["claude", "-p", "--output-format", "json"]
+      timeout_sec: 600
+    price:
+      # claude -p はサブスク実行のため単価0。実コストは span.cost_usd(応答の total_cost_usd)を正とする
+      input_per_1k: 0.0
+      output_per_1k: 0.0
+    fallback_to: chat-fallback
+
+  chat-fast:
+    adapter: claude_cli
+    params:
+      command: ["claude", "-p", "--output-format", "json"]
+      timeout_sec: 180
+    price: {input_per_1k: 0.0, output_per_1k: 0.0}
+
+  dde-batch:
+    # DDE の 50件バッチ分類用。移行時に挙動を変えないため、
+    # 既存 demand-discovery-engine/config.yaml の timeout_sec: 300 をそのまま踏襲する。
+    adapter: claude_cli
+    params:
+      command: ["claude", "-p", "--output-format", "json"]
+      timeout_sec: 300
+    price: {input_per_1k: 0.0, output_per_1k: 0.0}
+    fallback_to: chat-fallback
+
+  judge:
+    # 評価用。本番生成と分離しておく(自己評価バイアスの回避 / 将来の差し替え余地)
+    adapter: claude_cli
+    params:
+      command: ["claude", "-p", "--output-format", "json"]
+      timeout_sec: 300
+    price: {input_per_1k: 0.0, output_per_1k: 0.0}
+
+  chat-fallback:
+    adapter: mock
+    params: {mode: echo}
+
+  mock-echo:
+    # 動作確認・テスト専用
+    adapter: mock
+    params: {mode: echo}
+
+  harness-generator:
+    # optional extra `sdk-anthropic` が入っている環境でのみ解決可能。
+    # 実モデル名は環境変数から取る。
+    adapter: anthropic_sdk
+    params:
+      model_env: ANTHROPIC_MODEL
+      max_tokens: 4096
+    price:
+      input_per_1k: 0.0           # 実費は環境変数 ELF_PRICE_IN / ELF_PRICE_OUT で上書き
+      output_per_1k: 0.0
+    status: active

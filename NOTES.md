@@ -80,6 +80,29 @@ Prompt文字列がある。移行対象は3ファイル。
 抵触するため、キーのみ `<model-1>` へ置換して保存した。値・構造・他フィールドは実物のまま。
 Adapter は `modelUsage` を読まない(§5.4 の取得対象外)ため、テストの有効性は損なわれない。
 
+### N-012 カバレッジ計測対象を gateway / prompt / registry の3つに絞った
+`pyproject.toml` の `fail_under = 80` は当初 `llmops` 全体を対象にしていたが、
+CLAUDE.md の規定は「`gateway` / `prompt` / `registry` は行カバレッジ80%以上」であり、
+全体80%ではない。全体を対象にすると Phase 1 で空のまま残る `eval/` `governance/` を
+埋めるためだけのテストを書く圧力が生まれ、規定の意図(移行の安全網を厚くする)から外れる。
+
+`[tool.coverage.run] source` をこの3パッケージに限定し、CI のコマンドを
+`pytest -q --cov --cov-report=term-missing`(`--cov=llmops` から変更)にした。
+`--cov` に値を渡すと `source` が上書きされるため。
+他モジュールにテストを書かないという意味ではない(`adapters` / `db` / `sdk` にも書く)。
+閾値による強制をこの3つに限る、という意味。
+
+### N-013 `spans` に `meta_json` 列を1つだけ足した
+`docs/impl/phase1_core.md` Step 1-4 は「`max_text_chars` 超過時は末尾を切り、
+`meta` に `truncated: true`」を要求するが、`03_詳細設計.md` §2.1 の `spans` には
+置き場が無い(`meta_json` を持つのは `traces` だけ)。設計内で完結させる案として
+(a) 切り詰めマーカーを本文に混ぜる (b) `raw_response_json` に混ぜる も検討したが、
+(a) は記録した入出力そのものを汚し、(b) は「Provider の生応答を丸ごと残す」という
+§2.1 の設計理由を壊す。span 単位の付帯情報を置く列を1つ足すのが最小の変更と判断した。
+
+ELF 自身の DB であり、既存5システムのスキーマではない(絶対ルール1の対象外)。
+Phase 2-3 のテーブルを先に作ったのと同じ理由で、後からの ALTER を避けるため今入れた。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

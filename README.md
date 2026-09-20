@@ -156,7 +156,7 @@ llmops eval add-case cgmp-section --from-span <span_id>   # 本番失敗を回�
 
 | Phase | 内容 | 状態 |
 |---|---|---|
-| Phase 0 | リポジトリ初期化 / 開発環境 / CI / 骨格 | 未着手 |
+| Phase 0 | リポジトリ初期化 / 開発環境 / CI / 骨格 | ✅ 完了 |
 | Phase 1 | Gateway / Model Registry / Prompt Registry / Trace / Cost / 互換shim | 未着手 |
 | Phase 2 | Evaluation / Regression / 決定的評価 / Judge / Groundedness | 未着手 |
 | Phase 3 | Governance / 資産台帳 / canary / rollback / 監査 | 未着手 |

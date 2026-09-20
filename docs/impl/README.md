@@ -43,10 +43,26 @@ Phase 0 は完了しています。docs/impl/phase1_core.md を開き、Step 1-1
 このPhaseの本質は「既存の動いているシステムを壊さずに、LLM呼び出しを1点に集約し、
 Prompt をコードから出すこと」です。新機能を作ることではありません。
 
+Phase 0 の実測結果を前提にしてください:
+- docs/03_詳細設計.md §5.4 が拾う予定のフィールドは claude -p の実応答に全て実在する
+  (total_cost_usd / duration_api_ms / num_turns / session_id /
+   usage.{input,output,cache_read_input,cache_creation_input}_tokens)。設計変更は不要
+- 実応答は tests/fixtures/claude_cli_response_success.json にある。
+  Step 1-2 の claude_cli Adapter テストはこれを使うこと。新たに手書きしない
+- 上記に加えて欠損版・is_error版・不正JSON版の fixture を作り、
+  「必須は result のみ、他は .get() で欠損許容」(絶対ルール9)を検証すること
+- fixture の modelUsage は実モデル名を匿名化済み(N-011)。
+  Adapter はこのフィールドを読まない。読む実装にしないこと(絶対ルール13)
+
 Step 1-7(DDE移行)と Step 1-8(CGMP移行)で既存リポジトリを触りますが、
 その前に必ず docs/05_既存システム統合.md を読み直してください。
 Prompt 移行では「ゴールデンファイルでバイト一致を検証してから切り替える」
 「文言改善を同時にやらない」を必ず守ること。
+
+なお pyproject の coverage fail_under は現在グローバル80%です。Phase 1 では
+governance/ や eval/ が空のまま残るため、これが「カバレッジを満たすためだけの
+テスト」を誘発します。CLAUDE.md の規定は gateway / prompt / registry の80%なので、
+計測対象をその3つに絞る設定へ変更し、判断を NOTES.md に記録してください。
 
 各Stepの完了条件を満たしたらテストを通し、コミットしてから次へ進んでください。
 ```

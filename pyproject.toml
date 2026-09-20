@@ -16,13 +16,17 @@ dependencies = [
 [project.optional-dependencies]
 eval = ["jsonschema>=4.21"]
 sdk-anthropic = ["anthropic>=0.40"]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5", "mypy>=1.10"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5", "mypy>=1.10", "types-PyYAML>=6.0"]
 
 [project.scripts]
 llmops = "llmops.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# schema.sql と init の雛形はパッケージに同梱する(Prompt本文をPythonに書かないため。絶対ルール11)
+llmops = ["db/*.sql", "templates/*.yaml", "templates/prompts/**/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -40,5 +44,12 @@ python_version = "3.11"
 strict = true
 files = ["src/llmops"]
 
+[tool.coverage.run]
+# CLAUDE.md のカバレッジ規定は gateway / prompt / registry の3つ。計測対象をそこに絞る。
+# llmops 全体を対象にすると、Phase 1 では空のままの eval/ governance/ を埋めるためだけの
+# テストを書く圧力が生まれ、規定の意図から外れる(NOTES.md N-012)。
+source = ["llmops.gateway", "llmops.prompt", "llmops.registry"]
+
 [tool.coverage.report]
 fail_under = 80
+show_missing = true

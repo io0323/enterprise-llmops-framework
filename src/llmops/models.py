@@ -1,1 +1,69 @@
-"""ELF 内部で受け渡す DTO(dataclass)。実装は Phase 1 Step 1-1。"""
+"""ELF 内部で受け渡す DTO(dataclass)。
+
+設定ロードのみ pydantic、それ以外は dataclass(CLAUDE.md コーディング規約)。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Observability(db/repository.py が読み書きする形)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TraceStart:
+    """`traces` へ INSERT する内容。"""
+
+    id: str
+    system: str
+    operation: str
+    external_id: str | None = None
+    meta: dict[str, Any] | None = None
+
+
+@dataclass
+class SpanStart:
+    """`spans` へ呼び出し**前**に INSERT する内容(絶対ルール5)。
+
+    プロセスが落ちても「呼び出そうとした」記録が残るよう、応答に依存する列は持たない。
+    """
+
+    id: str
+    trace_id: str
+    seq: int
+    task: str
+    logical_model: str
+    adapter: str
+    request_text: str
+    parent_span_id: str | None = None
+    prompt_id: str | None = None
+    prompt_version: int | None = None
+    render_hash: str | None = None
+    model_version: int | None = None
+    resolved_target: str | None = None
+    attempt: int = 1
+
+
+@dataclass
+class SpanEnd:
+    """`spans` を呼び出し後に UPDATE する内容。"""
+
+    success: bool
+    response_text: str | None = None
+    raw_response_json: str | None = None
+    degraded: bool = False
+    error_type: str | None = None
+    error_message: str | None = None
+    duration_ms: int | None = None
+    api_duration_ms: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_usd: float | None = None
+    num_turns: int | None = None
+    provider_session: str | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
