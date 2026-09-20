@@ -223,10 +223,44 @@ DDE の e2e テストは `llm_logs` の行数で「LLM が何回呼ばれたか�
 (この隔離を入れる前に1回テストを流してしまい、実DBに 34 trace / 85 span が
 混入した。SQL で除去し `cost_daily` を `spans` から再構築済み。)
 
+### N-026 本番モデルの `fallback_to` を外した(mock へ落とすと偽の結果が返る)
+「未決事項」に挙げていたリスクが CGMP の移行中に**実際に起きた**。
+
+`chat-standard` の Fallback 先は `chat-fallback`(mock, mode: echo)だった。
+`claude -p` の応答が壊れたケースで Fallback が走り、mock がプロンプトをそのまま返す。
+CGMP の rubric プロンプトには出力例の JSON が含まれているため、`extract_json` が
+その例を拾ってしまい、**評価スコア 84.29 という偽の値が通った**
+(本来は「LLM評価をスキップ」になるべきケース)。
+
+対処: `models.yaml` の `chat-standard` / `dde-batch` から `fallback_to` を削除した。
+DDE も CGMP も移行前は Fallback を持っておらず、これで既存挙動と一致する。
+`chat-fallback` の定義自体は残す(Fallback 機構のテスト用)。
+
+FR-014(Provider失敗時のFallback)は Gateway の機能として実装済みで、
+`tests/test_gateway.py::test_fallback_marks_degraded` が受入条件を満たしている。
+本番の論理モデルでそれを有効にするかは別の判断であり、
+**Fallback 先が本物の代替 Provider になるまでは有効にしない**。
+
+### N-027 CGMP 移行で見つかった互換shim の挙動差分(3件)
+互換shim は「既存 LLMClient と同一シグネチャ」だけでは不十分で、
+**同一の副作用**が要る。CGMP の既存テストが以下を検出した:
+
+1. `_call` が `ensure_budget` を通っていなかった。既存実装は呼び出し前に必ず
+   残枠を確保していた(再試行ぶん込み)。抜けていると上限0でも呼び出しが走る
+2. 呼び出し上限を ELF 側の値で判定していた。CGMP は `pipeline.py` と
+   `outline/generator.py` でも `writer.llm_calls_per_article_limit` を見て事前検算するため、
+   shim だけ別の値を使うと両者が食い違う。アプリ側の値を優先するようにした
+3. request_id ごとに毎回新しい trace を作っていた。既存の `llm_logs` は
+   request_id 単位で実行を跨いで積算されるため、毎回新規だと「再開すると枠が戻る」
+
+いずれも「シグネチャが同じでテストが通る」だけでは見つからない。
+**既存テストをそのまま通すことが最も確実な検出手段だった。**
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。
-- **`chat-fallback` が `mock` であることの是非**。`models.yaml` の設計どおり
+- ~~**`chat-fallback` が `mock` であることの是非**~~ → N-026 で解消(fallback_to を外した)。
+  以下は経緯として残す。`models.yaml` の当初設計では
   `chat-standard` / `dde-batch` の Fallback 先は `mock`(echo)である。
   本番で `claude_cli` が落ちると、mock がプロンプトをそのまま返す。JSON 期待の
   呼び出し(DDE の全3種・CGMP の outline/closing)は `extract_json` が失敗して

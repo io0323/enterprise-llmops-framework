@@ -10,7 +10,7 @@ models:
       # claude -p はサブスク実行のため単価0。実コストは span.cost_usd(応答の total_cost_usd)を正とする
       input_per_1k: 0.0
       output_per_1k: 0.0
-    fallback_to: chat-fallback
+    # fallback_to は設定しない。理由は NOTES.md N-026(mock へ落とすと偽の結果が返る)
 
   chat-fast:
     adapter: claude_cli
@@ -27,7 +27,7 @@ models:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 300
     price: {input_per_1k: 0.0, output_per_1k: 0.0}
-    fallback_to: chat-fallback
+    # fallback_to は設定しない(N-026)
 
   judge:
     # 評価用。本番生成と分離しておく(自己評価バイアスの回避 / 将来の差し替え余地)
@@ -38,6 +38,9 @@ models:
     price: {input_per_1k: 0.0, output_per_1k: 0.0}
 
   chat-fallback:
+    # Fallback 機構そのものの動作確認用。**本番モデルの fallback_to には指定しない**。
+    # mock(echo)はプロンプトをそのまま返すため、JSON例を含むプロンプトだと
+    # 「それらしい結果」が通ってしまう(NOTES.md N-026 で実際に起きた)
     adapter: mock
     params: {mode: echo}
 

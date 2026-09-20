@@ -540,6 +540,15 @@ class Repository:
         params.append(limit)
         return list(self.conn.execute(sql, params).fetchall())
 
+    def find_trace_by_external_id(self, system: str, external_id: str) -> sqlite3.Row | None:
+        """system + external_id で trace を引く(1記事 = 1 trace を跨プロセスで保つため)。"""
+        row = self.conn.execute(
+            "SELECT * FROM traces WHERE system = ? AND external_id = ?"
+            " ORDER BY started_at DESC LIMIT 1",
+            (system, external_id),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
     def find_trace(self, key: str) -> sqlite3.Row | None:
         """trace_id か external_id で1件引く(CLI が両方を受けるため)。"""
         row = self.conn.execute(
