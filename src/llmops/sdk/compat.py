@@ -32,6 +32,10 @@ from llmops.sdk.client import LLMOps, app_config_path, app_config_section
 
 logger = get_logger(__name__)
 
+#: trace の operation 名の既定値。アプリ側は `llmops.operation` か
+#: `LLMClient(..., operation=...)` で意味のある名前を付ける
+DEFAULT_OPERATION = "compat.llm_client"
+
 __all__ = ["LLMBudgetExceeded", "LLMClient", "LLMError"]
 
 def _app_call_limit(config: Any, section: Mapping[str, Any]) -> int | None:
@@ -59,6 +63,7 @@ class LLMClient:
         system: str | None = None,
         ops: LLMOps | None = None,
         model: str | None = None,
+        operation: str | None = None,
     ) -> None:
         """
         Args:
@@ -84,6 +89,9 @@ class LLMClient:
         self.system = str(resolved_system)
         self.ops = LLMOps.from_runtime(self.ops.runtime, system=self.system)
         self._call_limit = _app_call_limit(config, section)
+        #: trace の operation 名。アプリ側で意味のある名前を付けられるようにする
+        #: (既定のままだと「何の処理の trace か」が後から判らない)
+        self.operation = operation or str(section.get("operation") or DEFAULT_OPERATION)
         self.model = model or section.get("model") or self.ops.config.gateway.default_model
         #: request_id → trace_id。呼び出し回数は trace 単位で数える
         self._traces: dict[str | None, str] = {}
@@ -91,7 +99,12 @@ class LLMClient:
     # ------------------------------------------------------------------
     @classmethod
     def from_runtime(
-        cls, runtime: Runtime, *, system: str, model: str | None = None
+        cls,
+        runtime: Runtime,
+        *,
+        system: str,
+        model: str | None = None,
+        operation: str | None = None,
     ) -> LLMClient:
         """テスト用。組み立て済みの Runtime を使う。"""
         return cls(
@@ -100,6 +113,7 @@ class LLMClient:
             system=system,
             ops=LLMOps.from_runtime(runtime, system=system),
             model=model,
+            operation=operation,
         )
 
     @property
@@ -133,7 +147,7 @@ class LLMClient:
                 str(existing["id"])
                 if existing is not None
                 else self.ops.runtime.tracer.start_trace(
-                    "compat.llm_client", external_id=request_id
+                    self.operation, external_id=request_id
                 )
             )
         return self._traces[request_id]
