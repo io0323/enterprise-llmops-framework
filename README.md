@@ -157,7 +157,7 @@ llmops eval add-case cgmp-section --from-span <span_id>   # 本番失敗を回�
 | Phase | 内容 | 状態 |
 |---|---|---|
 | Phase 0 | リポジトリ初期化 / 開発環境 / CI / 骨格 | ✅ 完了 |
-| Phase 1 | Gateway / Model Registry / Prompt Registry / Trace / Cost / 互換shim | 未着手 |
+| Phase 1 | Gateway / Model Registry / Prompt Registry / Trace / Cost / 互換shim | ✅ 完了 |
 | Phase 2 | Evaluation / Regression / 決定的評価 / Judge / Groundedness | 未着手 |
 | Phase 3 | Governance / 資産台帳 / canary / rollback / 監査 | 未着手 |
 | Phase 4 | JVM側(PEP/APAP)統合 | 対象外(契約一致のみ) |
@@ -170,11 +170,24 @@ llmops eval add-case cgmp-section --from-span <span_id>   # 本番失敗を回�
 ## 移行順序
 
 ```
-ELF Core(mock Adapterで自己完結)
-  → DDE(注入点1箇所。手順の検証)
-  → CGMP(注入点8ファイル。最大の効果)
-  → Harness(trace注入 + SDK Adapter)
+ELF Core(mock Adapterで自己完結)        ✅ Phase 1
+  → DDE(注入点1箇所。手順の検証)         ✅ 498 tests green
+  → CGMP(注入点8ファイル。最大の効果)     ✅ 808 tests green
+  → Harness(trace注入 + SDK Adapter)     ← 次
   → Phase 2 評価ゲート
 ```
 
 小さい順に移行し、各ステップで既存テストが全て通ることを条件とする。詳細とリスクは `docs/05_既存システム統合.md`。
+
+### Phase 1 で移行した Prompt
+
+| prompt_id | 移行元 |
+|---|---|
+| `dde.expand` / `dde.classify` / `dde.cluster_naming` | `dde/llm/prompts.py`(削除済み) |
+| `cgmp.outline` / `cgmp.section` / `cgmp.section_no_context` / `cgmp.closing` | `cgmp/llm/prompts.py`(削除済み) |
+| `cgmp.rubric` | `cgmp/quality/rubric.py` |
+| `cgmp.sns_summary` | `cgmp/formatter/sns.py` |
+| `_fragments/*`(6件) | CGMP の共有ルール定数(7箇所から参照されていた) |
+
+移行はすべて**ゴールデンファイルによるバイト一致検証**を通している
+(`tests/test_golden_prompts.py`)。文言は一字も変えていない。
