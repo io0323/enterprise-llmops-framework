@@ -55,6 +55,31 @@ Prompt文字列がある。移行対象は3ファイル。
 これらはPrompt定義と後処理ロジックが同居しているため、**Prompt文字列だけを移し、
 後処理(スコア変換・文字数計算・ハッシュタグ整形)はCGMP側に残す**。
 
+### N-010 `claude -p --output-format json` の実応答フィールドを実測・記録した(Phase 0)
+測定日 2026-09-20 / Claude Code 2.1.108。`docs/impl/_claude_cli_response_sample.json` が実物、
+`tests/fixtures/claude_cli_response_success.json` が Adapter テスト用のコピー。
+
+実在したトップレベルフィールド:
+`type` `subtype` `is_error` `duration_ms` `duration_api_ms` `num_turns` `result` `stop_reason`
+`session_id` `total_cost_usd` `usage` `modelUsage` `permission_denials` `terminal_reason`
+`fast_mode_state` `uuid`
+
+`usage` の中身:
+`input_tokens` `output_tokens` `cache_creation_input_tokens` `cache_read_input_tokens`
+`server_tool_use` `service_tier` `cache_creation` `inference_geo` `iterations` `speed`
+
+**設計は変更しない**(絶対ルール9 / N-007)。`03_詳細設計.md` §5.4 が拾う予定の
+`total_cost_usd` / `duration_api_ms` / `num_turns` / `session_id` /
+`usage.input_tokens` / `usage.output_tokens` / `usage.cache_read_input_tokens` /
+`usage.cache_creation_input_tokens` は**全て実在した**。
+設計に無かった `stop_reason` `terminal_reason` `modelUsage` 等は構造化カラムを増やさず
+`raw_response_json` に残すのみとする(カラム追加は実データで必要性が示されてから)。
+
+### N-011 サンプル応答の実モデル名を匿名化してコミットした
+実応答の `modelUsage` は実モデル名をキーに持つ。絶対ルール13(実モデル名を成果物に書かない)に
+抵触するため、キーのみ `<model-1>` へ置換して保存した。値・構造・他フィールドは実物のまま。
+Adapter は `modelUsage` を読まない(§5.4 の取得対象外)ため、テストの有効性は損なわれない。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。
