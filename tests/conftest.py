@@ -10,9 +10,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from llmops.adapters.base import AdapterRequest, AdapterResponse, ProviderAdapter
 from llmops.config import Config, load_config
 from llmops.db.connection import MEMORY
 from llmops.db.repository import Repository
+from llmops.errors import AdapterError
 from llmops.gateway import Runtime
 
 SMOKE_MD = """---
@@ -94,3 +96,30 @@ def runtime(config: Config, repo: Repository) -> Runtime:
     runtime.prompts.sync()
     runtime.models.sync()
     return runtime
+
+
+class CountingAdapter(ProviderAdapter):
+    """N 回失敗してから成功する Adapter(retry / fallback の検証用)。
+
+    テストモジュール間で共有するため conftest に置く。テスト同士を import し合うと、
+    `python -m pytest` では通るのに `pytest` では ModuleNotFoundError になる
+    (前者だけが CWD を sys.path に入れる)。
+    """
+
+    name = "counting"
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.calls = 0
+        self.fail_times = fail_times
+
+    def invoke(self, req: AdapterRequest) -> AdapterResponse:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise AdapterError(f"失敗 {self.calls} 回目")
+        return AdapterResponse(text=req.text, raw={"result": req.text}, cost_usd=0.0)
+
+
+@pytest.fixture()
+def counting_adapter() -> type[CountingAdapter]:
+    """`CountingAdapter` クラスそのものを渡す(失敗回数はテスト側で決める)。"""
+    return CountingAdapter

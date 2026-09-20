@@ -14,7 +14,6 @@ from llmops.adapters.base import AdapterRequest, AdapterResponse, ProviderAdapte
 from llmops.config import Config
 from llmops.db.repository import Repository
 from llmops.errors import (
-    AdapterError,
     AllProvidersFailed,
     LLMBudgetExceeded,
     LLMError,
@@ -41,22 +40,6 @@ def _request(trace_id: str, **kwargs: Any) -> CompletionRequest:
 
 def _trace(runtime: Runtime) -> str:
     return runtime.tracer.start_trace("test.op")
-
-
-class CountingAdapter(ProviderAdapter):
-    """N 回失敗してから成功する Adapter(retry の検証用)。"""
-
-    name = "counting"
-
-    def __init__(self, fail_times: int = 0) -> None:
-        self.calls = 0
-        self.fail_times = fail_times
-
-    def invoke(self, req: AdapterRequest) -> AdapterResponse:
-        self.calls += 1
-        if self.calls <= self.fail_times:
-            raise AdapterError(f"失敗 {self.calls} 回目")
-        return AdapterResponse(text=req.text, raw={"result": req.text}, cost_usd=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +183,10 @@ def test_unknown_model_is_not_found(runtime: Runtime) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_retry_succeeds_on_second_attempt(runtime: Runtime, repo: Repository) -> None:
-    adapter = CountingAdapter(fail_times=1)
+def test_retry_succeeds_on_second_attempt(
+    runtime: Runtime, repo: Repository, counting_adapter: type[Any]
+) -> None:
+    adapter = counting_adapter(fail_times=1)
     runtime.gateway._adapters["mock"] = adapter
     trace_id = _trace(runtime)
 
@@ -214,8 +199,10 @@ def test_retry_succeeds_on_second_attempt(runtime: Runtime, repo: Repository) ->
     assert result.degraded is False
 
 
-def test_failed_attempt_is_recorded_with_error(runtime: Runtime, repo: Repository) -> None:
-    runtime.gateway._adapters["mock"] = CountingAdapter(fail_times=1)
+def test_failed_attempt_is_recorded_with_error(
+    runtime: Runtime, repo: Repository, counting_adapter: type[Any]
+) -> None:
+    runtime.gateway._adapters["mock"] = counting_adapter(fail_times=1)
     trace_id = _trace(runtime)
     runtime.gateway.complete(_request(trace_id))
 
@@ -237,11 +224,13 @@ def test_fallback_marks_degraded(runtime: Runtime, repo: Repository) -> None:
     assert span["logical_model"] == "mock-echo"
 
 
-def test_fallback_is_single_hop(runtime: Runtime, repo: Repository, config: Config) -> None:
+def test_fallback_is_single_hop(
+    runtime: Runtime, repo: Repository, counting_adapter: type[Any]
+) -> None:
     """2段目の Fallback は構造的に起きない(絶対ルール7)。"""
     trace_id = _trace(runtime)
     # always-fail → mock-echo。mock-echo も失敗させると、そこで打ち切られる
-    runtime.gateway._adapters["mock"] = CountingAdapter(fail_times=99)
+    runtime.gateway._adapters["mock"] = counting_adapter(fail_times=99)
     with pytest.raises(AllProvidersFailed):
         runtime.gateway.complete(_request(trace_id, model="always-fail"))
 
@@ -272,7 +261,9 @@ def test_fallback_disabled_by_config(config: Config, repo: Repository) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_calls_per_trace_limit_stops_before_adapter(config: Config, repo: Repository) -> None:
+def test_calls_per_trace_limit_stops_before_adapter(
+    config: Config, repo: Repository, counting_adapter: type[Any]
+) -> None:
     """完了条件: 上限到達で呼び出し前に例外。**Adapter が呼ばれていない**こと。"""
     tight = config.model_copy(
         update={"guard": config.guard.model_copy(update={"calls_per_trace_limit": 2})}
@@ -281,7 +272,7 @@ def test_calls_per_trace_limit_stops_before_adapter(config: Config, repo: Reposi
     runtime.prompts.sync()
     runtime.models.sync()
 
-    adapter = CountingAdapter()
+    adapter = counting_adapter()
     runtime.gateway._adapters["mock"] = adapter
     trace_id = _trace(runtime)
 
@@ -328,7 +319,9 @@ def test_soft_quota_only_warns(config: Config, repo: Repository) -> None:
     assert runtime.gateway.complete(_request(trace_id, attempts=1)).text
 
 
-def test_budget_stops_before_adapter(config: Config, repo: Repository) -> None:
+def test_budget_stops_before_adapter(
+    config: Config, repo: Repository, counting_adapter: type[Any]
+) -> None:
     """予算超過は呼び出し前に止める(FR-034)。"""
     budgeted = config.model_copy(
         update={"budget": config.budget.model_copy(update={"global_monthly_usd": 0.001})}
@@ -336,7 +329,7 @@ def test_budget_stops_before_adapter(config: Config, repo: Repository) -> None:
     runtime = Runtime.build(budgeted, repo=repo)
     runtime.prompts.sync()
     runtime.models.sync()
-    adapter = CountingAdapter()
+    adapter = counting_adapter()
     runtime.gateway._adapters["mock"] = adapter
     trace_id = _trace(runtime)
 

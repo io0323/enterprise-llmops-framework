@@ -101,10 +101,10 @@ def test_task_defaults_to_prompt_suffix(runtime: Runtime, repo: Repository) -> N
     assert span["task"] == "smoke"
 
 
-def test_retry_false_means_single_attempt(runtime: Runtime, repo: Repository) -> None:
-    from tests.test_gateway import CountingAdapter
-
-    runtime.gateway._adapters["mock"] = CountingAdapter(fail_times=5)
+def test_retry_false_means_single_attempt(
+    runtime: Runtime, repo: Repository, counting_adapter: type[Any]
+) -> None:
+    runtime.gateway._adapters["mock"] = counting_adapter(fail_times=5)
     ops = LLMOps.from_runtime(runtime)
     with ops.trace("t") as tr, pytest.raises(LLMError):
         ops.complete(prompt_id="elf.smoke", variables={"message": "x"}, retry=False)
