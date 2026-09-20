@@ -499,3 +499,51 @@ class Repository:
 
     def list_budgets(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM budgets ORDER BY id").fetchall())
+
+    # ------------------------------------------------------------------
+    # 参照系(レポート / trace 表示)
+    # ------------------------------------------------------------------
+    def spans_since(self, since: str, *, system: str | None = None) -> list[sqlite3.Row]:
+        """`since`(YYYY-MM-DD HH:MM:SS)以降の span を trace の system 付きで返す。"""
+        sql = """
+            SELECT s.*, t.system AS system, t.operation AS operation
+              FROM spans s JOIN traces t ON t.id = s.trace_id
+             WHERE s.created_at >= ?
+        """
+        params: tuple[str, ...] = (since,)
+        if system is not None:
+            sql += " AND t.system = ?"
+            params = (since, system)
+        sql += " ORDER BY s.created_at"
+        return list(self.conn.execute(sql, params).fetchall())
+
+    def list_traces(
+        self,
+        *,
+        since: str | None = None,
+        system: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM traces WHERE 1 = 1"
+        params: list[Any] = []
+        if since is not None:
+            sql += " AND started_at >= ?"
+            params.append(since)
+        if system is not None:
+            sql += " AND system = ?"
+            params.append(system)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        return list(self.conn.execute(sql, params).fetchall())
+
+    def find_trace(self, key: str) -> sqlite3.Row | None:
+        """trace_id か external_id で1件引く(CLI が両方を受けるため)。"""
+        row = self.conn.execute(
+            "SELECT * FROM traces WHERE id = ? OR external_id = ? ORDER BY started_at DESC LIMIT 1",
+            (key, key),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)

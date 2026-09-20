@@ -8,6 +8,7 @@ from __future__ import annotations
 import difflib
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from llmops.errors import LLMOpsError
 from llmops.gateway import Runtime
 from llmops.logging_utils import get_logger, setup_logging
 from llmops.models import CompletionRequest
+from llmops.observability.report import cost_report, parse_since
 from llmops.observability.tracer import new_id
 from llmops.prompt import catalog as prompt_catalog
 from llmops.prompt.registry import PromptRegistry
@@ -37,8 +39,14 @@ prompt_app = typer.Typer(
     name="prompt", help="Prompt 資産の一覧・表示・状態遷移", no_args_is_help=True
 )
 model_app = typer.Typer(name="model", help="論理モデルの一覧・疎通確認", no_args_is_help=True)
+trace_app = typer.Typer(name="trace", help="trace / span の参照", no_args_is_help=True)
+report_app = typer.Typer(name="report", help="Markdown レポート", no_args_is_help=True)
+budget_app = typer.Typer(name="budget", help="予算の確認・設定", no_args_is_help=True)
 app.add_typer(prompt_app)
 app.add_typer(model_app)
+app.add_typer(trace_app)
+app.add_typer(report_app)
+app.add_typer(budget_app)
 
 CONFIG_OPTION = typer.Option(None, "--config", help="config.yaml のパス")
 
@@ -73,6 +81,10 @@ def _copy_missing(src: Path, dst: Path) -> list[Path]:
         shutil.copyfile(path, target)
         created.append(target)
     return created
+
+
+def _sql_time(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _load_vars(path: str | None) -> dict[str, Any]:
@@ -464,3 +476,197 @@ def run(
         f"{result.duration_ms}ms degraded={result.degraded}"
     )
     typer.echo(f"--- trace: {trace_id}")
+
+
+# ---------------------------------------------------------------------------
+# trace / report / budget
+# ---------------------------------------------------------------------------
+
+
+@trace_app.command("list")
+def trace_list(
+    since: str = typer.Option("7d", "--since", help="7d / 24h / 2026-09-01"),
+    system: str | None = typer.Option(None, "--system"),
+    status: str | None = typer.Option(None, "--status", help="running/success/partial/failed"),
+    limit: int = typer.Option(50, "--limit"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """trace の一覧(新しい順)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        rows = repo.list_traces(
+            since=_sql_time(parse_since(since)), system=system, status=status, limit=limit
+        )
+        spans = {row["id"]: repo.count_spans(str(row["id"])) for row in rows}
+    finally:
+        repo.close()
+
+    if not rows:
+        typer.echo("該当する trace がありません")
+        return
+    for row in rows:
+        external = "" if row["external_id"] is None else f" ext={row['external_id']}"
+        typer.echo(
+            f"{row['started_at']} {row['system']:8} {row['operation']:24} "
+            f"{row['status']:8} spans={spans[row['id']]}{external} {row['id']}"
+        )
+
+
+@trace_app.command("show")
+def trace_show(
+    key: str,
+    full: bool = typer.Option(False, "--full", help="入出力を全文表示する"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """1つの trace の span を時系列で表示する(trace_id / external_id のどちらでも)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        trace = repo.find_trace(key)
+        if trace is None:
+            typer.echo(f"trace が見つかりません: {key}")
+            raise typer.Exit(code=1)
+        spans = repo.list_spans(str(trace["id"]))
+    finally:
+        repo.close()
+
+    typer.echo(f"trace: {trace['id']}")
+    typer.echo(
+        f"system={trace['system']} operation={trace['operation']} "
+        f"status={trace['status']} external_id={trace['external_id']}"
+    )
+    typer.echo(f"started={trace['started_at']} finished={trace['finished_at']}")
+    typer.echo("")
+
+    for span in spans:
+        prompt = (
+            "(adhoc)"
+            if span["prompt_id"] is None
+            else f"{span['prompt_id']}@{span['prompt_version']}"
+        )
+        flags = []
+        if not span["success"]:
+            flags.append("FAILED")
+        if span["degraded"]:
+            flags.append("degraded")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
+        typer.echo(
+            f"#{span['seq']} {span['task']:16} {prompt:28} model={span['logical_model']} "
+            f"adapter={span['adapter']} {span['duration_ms']}ms "
+            f"in={span['input_tokens']} out={span['output_tokens']} "
+            f"cost={span['cost_usd']} render_hash={span['render_hash']}{suffix}"
+        )
+        if span["error_message"]:
+            typer.echo(f"    error: {span['error_type']}: {span['error_message']}")
+        if full:
+            typer.echo(f"    --- request ---\n{span['request_text']}")
+            typer.echo(f"    --- response ---\n{span['response_text']}")
+
+
+@report_app.command("cost")
+def report_cost(
+    since: str = typer.Option("30d", "--since", help="7d / 24h / 2026-09-01"),
+    by: str = typer.Option("system", "--by", help="system / model / prompt"),
+    system: str | None = typer.Option(None, "--system"),
+    out: str | None = typer.Option(None, "--out", help="Markdown の出力先"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """コストレポート(Markdown)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        markdown = cost_report(repo, since=parse_since(since), by=by, system=system)
+    finally:
+        repo.close()
+
+    if out is None:
+        typer.echo(markdown)
+        return
+    path = Path(out)
+    if not path.is_absolute():
+        path = config.report_dir / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    typer.echo(f"written: {path}")
+
+
+@budget_app.command("show")
+def budget_show(config_path: str | None = CONFIG_OPTION) -> None:
+    """予算と当月の使用状況。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        states = runtime.guard.budget_states(config.system)
+        rows = runtime.repo.list_budgets()
+    finally:
+        runtime.close()
+
+    if not rows:
+        typer.echo("budgets テーブルは空です(config.yaml の budget が使われます)")
+    for row in rows:
+        hard = "hard" if row["hard_limit"] else "soft"
+        enabled = "enabled" if row["enabled"] else "disabled"
+        typer.echo(
+            f"{row['id']:10} scope={row['scope']:6} period={row['period']:8} "
+            f"limit={row['limit_usd']} ({hard}, {enabled})"
+        )
+    typer.echo("")
+    for state in states:
+        typer.echo(
+            f"{state.budget_id:10} 使用済み {state.used_usd:.6f} / {state.limit_usd:.6f} USD "
+            f"({state.percent:.1f}%)"
+        )
+
+
+@budget_app.command("set")
+def budget_set(
+    scope: str = typer.Option(..., "--scope", help="'global' または system 名"),
+    monthly: float = typer.Option(..., "--monthly", help="月額上限(USD)"),
+    hard: bool = typer.Option(True, "--hard/--soft", help="超過時に拒否するか"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """予算を登録・更新する。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        repo.upsert_budget(
+            budget_id=scope,
+            scope="global" if scope == "global" else "system",
+            period="monthly",
+            limit_usd=monthly,
+            hard_limit=hard,
+        )
+        repo.insert_audit_log(
+            event="budget.set",
+            actor=config.system,
+            subject=scope,
+            detail={"monthly_usd": monthly, "hard": hard},
+        )
+    finally:
+        repo.close()
+    typer.echo(f"budget: {scope} monthly={monthly} USD ({'hard' if hard else 'soft'})")
+
+
+@app.command("audit")
+def audit_tail(
+    event: str | None = typer.Option(None, "--event", help="prompt.publish / quota.exceeded など"),
+    limit: int = typer.Option(20, "--limit"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """監査ログの末尾(新しい順)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        rows = repo.list_audit_logs(event=event, limit=limit)
+    finally:
+        repo.close()
+
+    if not rows:
+        typer.echo("監査ログがありません")
+        return
+    for row in rows:
+        typer.echo(
+            f"{row['created_at']} {row['event']:22} actor={row['actor']} "
+            f"subject={row['subject']} {row['detail_json'] or ''}"
+        )
