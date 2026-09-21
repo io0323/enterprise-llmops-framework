@@ -407,6 +407,47 @@ N-026 の直接原因は、`extract_json` が **Prompt 内の出力例 JSON** �
 
 `[project.scripts]` の入口を `llmops.cli:app` から `llmops.cli:run_cli` に変えた。
 
+### N-040 未公開版の実行は「呼び出し側の申告」では許さない
+N-038 で足した `CompletionRequest.allow_unpublished` は、published ゲートを
+迂回できる経路である。フラグを立てれば通るなら、ゲートは実質無い。
+
+`Gateway._authorize_unpublished` が許すのは次の2つだけ:
+
+1. `gateway.allow_unpublished: true`(開発時の設定。本番は false)
+2. **その trace が評価実行のものであること**。`eval_runs` に `trace_id` が
+   一致する行があり、かつ `prompt_id` が一致するかで判定する
+
+`allow_unpublished=True` が渡されても、2の裏付けが無ければ `PolicyViolation` にする。
+**「評価経路かどうか」を呼び出し側の申告ではなく DB の実体で決める。**
+実体を作るには `eval_runs` に行を入れる必要があり、それ自体が記録として残る。
+
+どちらの経路で通した場合も:
+- `audit_logs` に `policy.unpublished_execution`(どの run・どの prompt・どの版・理由)
+- span の `meta_json` に `unpublished_execution: <status>` の印
+
+`llmops policy check` の `no_unpublished_in_production` が、この印を数えて
+**評価実行の裏付けが無いものだけ**を違反として挙げる。
+
+### N-041 週次レポートを `governance` に置いた(`observability` ではない)
+集計対象がコスト(observability)・Policy(guard)・台帳と監査(governance)に跨る。
+`observability` に置くと `observability → guard → observability` の循環になり、
+依存の向きの絶対規約に反する(`tests/test_layering.py` が検出した)。
+週次レポートは「統制のための読み物」なので governance が置き場として正しい。
+
+### N-042 canary の振り分けを trace_id のハッシュにした
+乱数だと、1つの trace(=1記事の生成)の中で版が混ざりうる。混ざるとその出力が
+どちらの版のものか言えず、比較にならない。`sha256(trace_id) % 100 < percent` で
+**同じ trace は必ず同じ版**になるようにした。trace_id が無い場合(CLI の単発実行)
+だけ乱数に落ちる。
+
+### N-043 `policy check` の warn は「消す」のではなく「残す」
+移行で初回登録した版(`docs/05` の手順で published として登録したもの)には
+評価実行の裏付けが無い。`production-versions-need-evidence` がこれを warn で挙げる。
+
+形だけの評価スイートを作って warn を消すことはしない。**「裏付けが無い」は事実であり、
+消すべきなのは警告ではなく状態のほう**(Phase 2 の「偽の合格を作らない」と同じ考え方)。
+CI が見るのは `block` のみ(現在0件)。warn は週次レポートで棚卸しする。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

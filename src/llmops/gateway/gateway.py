@@ -24,6 +24,7 @@ from llmops.config import Config
 from llmops.errors import (
     AllProvidersFailed,
     LLMError,
+    PolicyViolation,
     PromptNotPublished,
 )
 from llmops.guard.quota import Guard
@@ -112,15 +113,80 @@ class Gateway:
                 raise LLMError("prompt_id も text も指定されていません")
             return None, req.text, None
 
-        prompt = self.prompts.resolve(req.prompt_id, req.version)
-        # 状態チェックを緩めるのは「設定で開発時に許す」か「評価の実行」の2つだけ。
-        # 後者は publish 前の候補版を採点するために必要(NOTES.md N-038)
-        allow_unpublished = self.config.gateway.allow_unpublished or req.allow_unpublished
-        if prompt.status != PUBLISHED and not allow_unpublished:
-            raise PromptNotPublished(prompt.prompt_id, prompt.version, prompt.status)
+        prompt = self.prompts.resolve(req.prompt_id, req.version, trace_id=req.trace_id)
+        if prompt.status != PUBLISHED:
+            self._authorize_unpublished(req, prompt)
 
         rendered = self.prompts.render(prompt, req.variables)
         return prompt, rendered.text, rendered.hash
+
+    def _authorize_unpublished(self, req: CompletionRequest, prompt: ResolvedPrompt) -> None:
+        """published でない版の実行を許すかどうかを決める(Step 3-4)。
+
+        published ゲートを迂回できる経路なので、**呼び出し側の申告では判定しない**。
+        許すのは次の2つだけ:
+
+        1. `gateway.allow_unpublished: true`(開発時の設定。本番では false)
+        2. **その trace が評価実行のものである**こと。`eval_runs` に実体があるかで
+           判定する(`req.allow_unpublished` が True でも、実体が無ければ通さない)
+
+        どちらで通した場合も `audit_logs` に残し、span の meta にも印を付ける。
+        「誰が・どの版を・未公開のまま実行したか」を後から数えられるようにするため。
+        """
+        if self.config.gateway.allow_unpublished:
+            logger.warning(
+                "gateway.allow_unpublished: true のため未公開版を実行します: %s@%s (%s)",
+                prompt.prompt_id, prompt.version, prompt.status,
+            )
+            self._audit_unpublished(req, prompt, reason="config.allow_unpublished")
+            return
+
+        eval_run = self._eval_run_for(req.trace_id)
+        if eval_run is not None and str(eval_run["prompt_id"]) == prompt.prompt_id:
+            self._audit_unpublished(
+                req, prompt, reason="eval_run", run_id=str(eval_run["id"])
+            )
+            return
+
+        if req.allow_unpublished:
+            # 申告はあったが裏付けが無い。**通さない**(これが権限昇格の入口になる)
+            raise PolicyViolation(
+                f"{prompt.prompt_id}@{prompt.version}: 未公開版の実行が要求されましたが、"
+                "この trace に対応する評価実行(eval_runs)がありません。"
+                "評価経路かどうかは呼び出し側の申告ではなく DB の実体で判定します"
+            )
+        raise PromptNotPublished(prompt.prompt_id, prompt.version, prompt.status)
+
+    def _eval_run_for(self, trace_id: str) -> Any | None:
+        try:
+            return self.tracer.repo.eval_run_for_trace(trace_id)
+        except Exception as exc:  # noqa: BLE001 - 判定できないなら「許さない」側に倒す
+            logger.warning("評価実行の照合に失敗しました(未公開版は許可しません): %s", exc)
+            return None
+
+    def _audit_unpublished(
+        self,
+        req: CompletionRequest,
+        prompt: ResolvedPrompt,
+        *,
+        reason: str,
+        run_id: str | None = None,
+    ) -> None:
+        try:
+            self.tracer.repo.insert_audit_log(
+                event="policy.unpublished_execution",
+                actor=self.system,
+                subject=f"{prompt.prompt_id}@{prompt.version}",
+                detail={
+                    "status": prompt.status,
+                    "reason": reason,
+                    "eval_run_id": run_id,
+                    "trace_id": req.trace_id,
+                    "task": req.task,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 監査の失敗で本処理を止めない
+            logger.warning("未公開版実行の監査記録に失敗しました: %s", exc)
 
     @staticmethod
     def _default_model(prompt: ResolvedPrompt | None) -> str:
@@ -172,6 +238,9 @@ class Gateway:
         duration_ms = int((time.monotonic() - started) * 1000)
         amount = self.cost.resolve_cost(model, response, text)
         meta: dict[str, Any] = dict(req.meta)
+        if prompt is not None and prompt.status != PUBLISHED:
+            # `llmops policy check` がここを数える(後から選別できる形で残す)
+            meta["unpublished_execution"] = prompt.status
         if truncated:
             meta["truncated"] = True
         if amount.estimated:

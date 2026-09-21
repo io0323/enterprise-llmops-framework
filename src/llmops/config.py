@@ -41,6 +41,7 @@ class PathsConfig(_Base):
     models_file: str = "models.yaml"
     evals_dir: str = "evals"
     report_dir: str = "output"
+    policies_file: str = "policies.yaml"
 
 
 class GatewayConfig(_Base):
@@ -92,6 +93,14 @@ class EvalConfig(_Base):
     mock_is_wiring_check: bool = True
 
 
+class RetentionConfig(_Base):
+    """保持期限(Step 3-5)。消すのは本文だけで、メタデータは残す。"""
+
+    span_text_days: int = 180
+    span_days: int = 730
+    archive_dir: str = "data/archive"
+
+
 class LoggingConfig(_Base):
     level: str = "INFO"
     file: str = "logs/llmops.log"
@@ -107,6 +116,7 @@ class Config(_Base):
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     root: Path = Field(default_factory=project_root)
@@ -139,6 +149,14 @@ class Config(_Base):
     @property
     def log_file(self) -> Path:
         return self.resolve(self.logging.file)
+
+    @property
+    def archive_dir(self) -> Path:
+        return self.resolve(self.retention.archive_dir)
+
+    @property
+    def policies_file(self) -> Path:
+        return self.resolve(self.paths.policies_file)
 
 
 def config_path(explicit: str | Path | None = None) -> Path:

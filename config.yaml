@@ -7,6 +7,7 @@ paths:
   models_file: "models.yaml"
   evals_dir: "evals"
   report_dir: "output"
+  policies_file: "policies.yaml"
 
 gateway:
   retry_max: 2                    # 初回+再試行。既存実装(max_retry:1)と等価
@@ -47,6 +48,14 @@ eval:
   forbid_judge_fallback: true     # judge 論理モデルに fallback_to があれば実行を拒否する
   fail_on_degraded: true          # degraded=1 の span が混ざった run は無条件で fail
   mock_is_wiring_check: true      # mock を通った run は baseline にしない(配線確認扱い)
+
+# --- 保持期限(Phase 3)-----------------------------------------------------
+# 消すのは本文だけ。コスト・トークン・render_hash・Prompt版は残す
+# (消すと長期の傾向分析ができなくなる)
+retention:
+  span_text_days: 180             # これを過ぎた span の入出力本文を消す
+  span_days: 730                  # span 行そのものを消す
+  archive_dir: "data/archive"     # 消す前に JSONL で書き出す先
 
 logging:
   level: INFO

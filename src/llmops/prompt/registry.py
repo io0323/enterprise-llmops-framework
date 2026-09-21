@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from collections.abc import Mapping
@@ -23,6 +24,9 @@ from llmops.prompt import loader
 from llmops.prompt.render import RenderResult, content_hash, expand_includes, render
 
 logger = get_logger(__name__)
+
+#: canary の振り分けに使うバケット数(0-99 の100分割 = percent と同じ単位)
+CANARY_BUCKETS = 100
 
 DRAFT = "draft"
 REVIEW = "review"
@@ -46,6 +50,18 @@ ALLOWED_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
         (DEPRECATED, ARCHIVED),
     }
 )
+
+
+def canary_bucket(trace_id: str | None, *, rng: random.Random | None = None) -> int:
+    """trace_id から 0-99 のバケットを決める。
+
+    同じ trace_id は必ず同じバケットになる(決定的)。`trace_id` が無い場合だけ
+    乱数に落ちる(CLI の単発実行など、trace をまたぐ比較が問題にならない場面)。
+    """
+    if trace_id is None:
+        return (rng or random.Random()).randrange(CANARY_BUCKETS)
+    digest = hashlib.sha256(trace_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % CANARY_BUCKETS
 
 
 class EvalGate(Protocol):
@@ -227,8 +243,15 @@ class PromptRegistry:
     # ------------------------------------------------------------------
     # resolve / render
     # ------------------------------------------------------------------
-    def resolve(self, prompt_id: str, version: int | None = None) -> ResolvedPrompt:
-        """版を決める。未指定なら deployments の active(canary 設定があれば確率で canary)。"""
+    def resolve(
+        self, prompt_id: str, version: int | None = None, *, trace_id: str | None = None
+    ) -> ResolvedPrompt:
+        """版を決める。未指定なら deployments の active(canary 設定があれば canary)。
+
+        `trace_id` を渡すと **canary の振り分けが trace 単位で決定的**になる。
+        1つの trace(=1記事の生成など)の中で版が混ざると、その出力が
+        どちらの版のものか言えなくなり、比較にならないため(Step 3-1)。
+        """
         if version is not None:
             row = self.repo.get_prompt_version(prompt_id, version)
             if row is None:
@@ -237,7 +260,7 @@ class PromptRegistry:
 
         deployment = self.repo.get_deployment(prompt_id)
         if deployment is not None:
-            chosen = self._choose_version(deployment)
+            chosen = self._choose_version(deployment, trace_id=trace_id)
             row = self.repo.get_prompt_version(prompt_id, chosen)
             if row is None:
                 raise PromptNotFound(f"Prompt が見つかりません: {prompt_id}@{chosen}")
@@ -250,10 +273,12 @@ class PromptRegistry:
             )
         return self._to_resolved(row)
 
-    def _choose_version(self, deployment: Any) -> int:
+    def _choose_version(self, deployment: Any, *, trace_id: str | None = None) -> int:
         canary_version = deployment["canary_version"]
         percent = int(deployment["canary_percent"] or 0)
-        if canary_version is not None and percent > 0 and self._rng.randint(1, 100) <= percent:
+        if canary_version is None or percent <= 0:
+            return int(deployment["active_version"])
+        if canary_bucket(trace_id, rng=self._rng) < percent:
             return int(canary_version)
         return int(deployment["active_version"])
 
