@@ -133,6 +133,10 @@ class CompletionRequest:
     attempts: int | None = None
     #: span の meta_json に残す付帯情報(互換shim の section_seq / batch_size など)
     meta: Mapping[str, Any] = field(default_factory=dict)
+    #: published 以外の版の実行を許す。**評価のための例外**(NOTES.md N-038)。
+    #: publish 前の候補版を評価できないと、評価ゲート自体が成立しないため。
+    #: 緩めるのは状態チェックだけで、Guard / Trace / Cost は通常どおり通る
+    allow_unpublished: bool = False
 
 
 @dataclass(frozen=True)

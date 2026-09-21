@@ -113,7 +113,10 @@ class Gateway:
             return None, req.text, None
 
         prompt = self.prompts.resolve(req.prompt_id, req.version)
-        if prompt.status != PUBLISHED and not self.config.gateway.allow_unpublished:
+        # 状態チェックを緩めるのは「設定で開発時に許す」か「評価の実行」の2つだけ。
+        # 後者は publish 前の候補版を採点するために必要(NOTES.md N-038)
+        allow_unpublished = self.config.gateway.allow_unpublished or req.allow_unpublished
+        if prompt.status != PUBLISHED and not allow_unpublished:
             raise PromptNotPublished(prompt.prompt_id, prompt.version, prompt.status)
 
         rendered = self.prompts.render(prompt, req.variables)

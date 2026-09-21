@@ -238,6 +238,9 @@ class EvalRunner:
                 task=suite.task or "eval",
                 as_json=suite.as_json,
                 trace_id=trace_id,
+                # 評価対象は publish 前の候補版であることが普通。
+                # 状態チェックだけを緩める(Guard / Trace / Cost は通常どおり)
+                allow_unpublished=True,
             )
         except LLMOpsError as exc:
             outcome.errors.append(f"generation: {exc}")

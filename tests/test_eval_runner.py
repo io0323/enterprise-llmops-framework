@@ -394,3 +394,47 @@ def test_origin_breakdown(runner: EvalRunner, runtime: Runtime, repo: Repository
         "manual": 1,
         "production-failure": 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# publish 前の候補版を評価できること(N-038)
+#
+# これができないと「評価してから publish」が原理的に成立しない
+# (Gateway は published 以外を拒否し、ゲートは評価済みを要求するため)。
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_version_can_be_evaluated(
+    runner: EvalRunner, runtime: Runtime, workspace: Path, repo: Repository
+) -> None:
+    path = workspace / "prompts" / "elf" / "smoke.md"
+    path.write_text(path.read_text().replace("書き写して", "写して"), encoding="utf-8")
+    version = next(r.version for r in runtime.prompts.sync() if r.prompt_id == "elf.smoke")
+    assert runtime.prompts.resolve("elf.smoke", version).status == "draft"
+    _add_case(runtime)
+
+    outcome = runner.run("elf-smoke", version=version)
+
+    assert outcome.prompt_version == version
+    assert outcome.errors == 0, "publish 前の版が評価できていない"
+    span = repo.list_spans(outcome.trace_id)[0]
+    assert span["prompt_version"] == version
+
+
+def test_gateway_still_refuses_unpublished_in_the_app_path(
+    runtime: Runtime, workspace: Path
+) -> None:
+    """緩めたのは評価経路だけ。アプリの通常呼び出しは従来どおり拒否する。"""
+    from llmops.errors import PromptNotPublished
+
+    path = workspace / "prompts" / "elf" / "smoke.md"
+    path.write_text(path.read_text().replace("書き写して", "写して"), encoding="utf-8")
+    runtime.prompts.sync()
+    trace_id = runtime.tracer.start_trace("t")
+    with pytest.raises(PromptNotPublished):
+        runtime.gateway.complete(
+            CompletionRequest(
+                trace_id=trace_id, task="smoke", prompt_id="elf.smoke",
+                variables={"message": "x"}, model="mock-echo", version=2,
+            )
+        )

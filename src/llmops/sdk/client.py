@@ -195,8 +195,13 @@ class LLMOps:
         trace_id: str | None = None,
         parent_span_id: str | None = None,
         meta: Mapping[str, Any] | None = None,
+        allow_unpublished: bool = False,
     ) -> CompletionResult:
-        """Registry 管理の Prompt を実行する。"""
+        """Registry 管理の Prompt を実行する。
+
+        `allow_unpublished` は**評価のための例外**。publish 前の候補版を採点する
+        ときだけ使う(NOTES.md N-038)。アプリの本番経路では使わない。
+        """
         return self.runtime.gateway.complete(
             CompletionRequest(
                 trace_id=self._trace_id_for(trace_id),
@@ -209,6 +214,7 @@ class LLMOps:
                 attempts=None if retry is not False else 1,
                 parent_span_id=parent_span_id,
                 meta=dict(meta or {}),
+                allow_unpublished=allow_unpublished,
             )
         )
 

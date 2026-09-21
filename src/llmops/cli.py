@@ -376,8 +376,23 @@ def prompt_canary(
     typer.echo(f"canary: {prompt_id}@{version} {percent}%")
 
 
+def run_cli() -> None:
+    """コンソールスクリプトの入口。
+
+    ELF が意図して送出する例外(`LLMOpsError` 系)は**想定内の結果**なので、
+    トレースバックではなく1行のメッセージで返す。評価ゲートで止まるのも
+    予算上限で止まるのも「正しく止まった」状態であり、バグではない。
+    予期しない例外はそのまま出す(こちらは調査が要る)。
+    """
+    try:
+        app()
+    except LLMOpsError as exc:
+        typer.secho(f"エラー: {exc}", err=True, fg=typer.colors.RED)
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":  # pragma: no cover
-    app()
+    run_cli()
 
 
 # ---------------------------------------------------------------------------

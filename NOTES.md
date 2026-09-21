@@ -384,6 +384,29 @@ N-026 の直接原因は、`extract_json` が **Prompt 内の出力例 JSON** �
 `eval_runs.judge_model` に記録した値と実際の採点者が食い違う記録は、
 比較の土台として使えない。黙って別モデルの点数を採用するくらいなら実行しない。
 
+### N-038 評価のときだけ published 以外の版を実行できるようにした
+**Phase 2 の設計に穴があった。** 実 CLI で通して初めて分かった:
+
+- Gateway は `status != published` を拒否する(FR-021 / 設計 §6)
+- 評価ゲートは「この版に対する eval_run があること」を要求する(Step 2-4)
+- publish 前の候補版は `approved` なので、**評価しようとすると Gateway が拒否する**
+
+つまり「評価してから publish」が原理的に成立しない状態だった。
+
+`CompletionRequest.allow_unpublished` を足し、評価の生成呼び出しだけが True を渡す。
+**緩めるのは状態チェックだけ**で、Guard / Trace / Cost は通常どおり通る
+(「評価専用の抜け道を作らない」= Gateway を迂回しない、という意図は守っている)。
+
+アプリの通常経路が従来どおり拒否することもテストで固定した
+(`test_gateway_still_refuses_unpublished_in_the_app_path`)。
+
+### N-039 CLI の想定内エラーはトレースバックを出さない
+評価ゲートで止まるのも予算上限で止まるのも「正しく止まった」状態であって、
+バグではない。`LLMOpsError` 系は1行のメッセージで返し、終了コード1にする。
+予期しない例外はトレースバックのまま出す(そちらは調査が要る)。
+
+`[project.scripts]` の入口を `llmops.cli:app` から `llmops.cli:run_cli` に変えた。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。
