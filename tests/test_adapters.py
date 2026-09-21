@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -352,3 +353,65 @@ def test_sdk_adapter_target_label_hides_model_name(monkeypatch: pytest.MonkeyPat
     label = AnthropicSdkAdapter()._target_label({"model_env": "ELF_TEST_MODEL"})
     assert label == "anthropic_sdk:$ELF_TEST_MODEL"
     assert "some-real-model-name" not in label
+
+
+# ---------------------------------------------------------------------------
+# anthropic_sdk — 構成済みクライアントの注入(Harness 統合 / NOTES.md N-044)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMessages:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+class _FakeSdkClient:
+    def __init__(self, response: Any) -> None:
+        self.messages = _FakeMessages(response)
+
+
+def _attr_response(text: str, input_tokens: int, output_tokens: int) -> SimpleNamespace:
+    """`model_dump` を持たない属性アクセス型の応答。"""
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
+    )
+
+
+def test_sdk_adapter_uses_injected_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """構成済みクライアントを渡せば SDK の import も API キーの探索もしない。"""
+    monkeypatch.setattr(
+        "llmops.adapters.anthropic_sdk._load_sdk", lambda: pytest.fail("SDK を生成してはいけない")
+    )
+    monkeypatch.setenv("ELF_TEST_MODEL", "resolved-from-env")
+    client = _FakeSdkClient(_attr_response("hello", 12, 3))
+
+    response = AnthropicSdkAdapter(client).invoke(
+        AdapterRequest("prompt text", {"model_env": "ELF_TEST_MODEL", "max_tokens": 2048})
+    )
+
+    assert response.text == "hello"
+    assert (response.input_tokens, response.output_tokens) == (12, 3)
+    assert response.cost_usd is None  # 金額は Cost 側が models.yaml の単価で当てる
+    call = client.messages.calls[0]
+    assert call["model"] == "resolved-from-env"
+    assert call["max_tokens"] == 2048
+    assert call["messages"] == [{"role": "user", "content": "prompt text"}]
+
+
+def test_sdk_adapter_wraps_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELF_TEST_MODEL", "m")
+    client = _FakeSdkClient(RuntimeError("overloaded"))
+    with pytest.raises(AdapterError, match="overloaded"):
+        AnthropicSdkAdapter(client).invoke(AdapterRequest("x", {"model_env": "ELF_TEST_MODEL"}))
+
+
+def test_sdk_adapter_health_true_with_injected_client() -> None:
+    assert AnthropicSdkAdapter(_FakeSdkClient(None)).health() is True

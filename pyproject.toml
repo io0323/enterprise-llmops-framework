@@ -26,7 +26,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # schema.sql と init の雛形はパッケージに同梱する(Prompt本文をPythonに書かないため。絶対ルール11)
-llmops = ["db/*.sql", "templates/*.yaml", "templates/prompts/**/*.md"]
+llmops = ["py.typed", "db/*.sql", "templates/*.yaml", "templates/prompts/**/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

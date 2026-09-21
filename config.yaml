@@ -26,6 +26,10 @@ guard:
     dde: 0
     # ELF 自身(評価実行)。1 run = 1 trace で、ケース数 × (生成 + Judge) ぶん呼ぶ
     elf: 0
+    # Harness。1パイプライン実行 = 1 trace で、候補数 × 最大3回再生成 × (生成 + 評価) を呼ぶ。
+    # 候補数は Harness の strategy.yaml が持つので ELF 側で二重に数えない。
+    # 有料APIの歯止めは回数ではなく金額: budgets の system=harness(NOTES.md N-044)
+    harness: 0
   hard_quota: true
 
 budget:

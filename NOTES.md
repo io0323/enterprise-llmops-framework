@@ -448,6 +448,79 @@ N-038 で足した `CompletionRequest.allow_unpublished` は、published ゲー�
 消すべきなのは警告ではなく状態のほう**(Phase 2 の「偽の合格を作らない」と同じ考え方)。
 CI が見るのは `block` のみ(現在0件)。warn は週次レポートで棚卸しする。
 
+### N-044 Harness の統合(Step 3-6)
+`shopping-sns-auto-operation/backend` の LLM 呼び出しを ELF 経由にした。
+`cost_guard.py`・承認ゲート・`job_queue.py`・パイプラインの状態遷移には触れていない。
+
+**Prompt の正本をどちらに置くか。** Harness は Prompt を自前の DB(`prompt_versions`)で
+版管理しており、Learning Agent が改善版(gen-v2…)を提案し、人が API で activate する。
+これは Harness の HITL であり ELF が吸収するものではない(絶対ルール3)。一方で
+「DB で activate すれば ELF の評価ゲートを通らずに本番の文面が変わる」状態を残すと、
+Phase 2 の目的(評価を通さずに publish できない)が Harness だけ抜け落ちる。そこで:
+
+- v1 の3本を `prompts/harness/{generator,evaluator,learning}.md` に登録した
+  (`{x}` → `{{ x }}` の機械変換のみ。ゴールデン5件でバイト一致を確認済み。
+  ゴールデンは Harness の .venv で**移行前の**現行関数を直接呼んで採取した)
+- Harness は従来どおり DB の本文でレンダリングし、その本文を `expected_text` として
+  ELF に渡す。ELF は自分のレンダリング結果とバイト比較し、違えば **LLM を呼ぶ前に**
+  `PromptMismatch` にする(課金も span も発生しない)
+- 結果として、Learning の提案版を Harness で activate しただけでは生成が止まる。
+  **ELF に登録 → 評価 → publish してから activate する**、が新しい手順になる。
+  止まり方は「候補1件の生成失敗」(generation.py が捕捉して次へ進む)で、
+  エラーメッセージが登録手順を示す。黙って古い版で生成するより止まるほうを選んだ
+
+**呼び出し口の形。** Agent → `LlmClient.complete(job_id, agent, model, prompt, max_tokens)`
+の形は変えていない。既存テストの Fake がこのキーワード引数をそのまま受けるため。
+Prompt の ELF 上の身元(prompt_id / 変数)は `RegisteredPrompt`(`str` のサブクラス)に
+載せて運ぶ。文字列としては従来の本文そのものなので、書き出し API や Fake からは区別がつかない。
+
+- 改善指示ブロック(「# 改善指示 …」)の文言は Harness の Python に残し、変数
+  `improvement` で渡す。ELF のテンプレートは制御構文を持たないため(N-024 と同じ扱い)。
+  文言を ELF 側へ移すのは、評価スイートが揃ってから(移行の鉄則4)
+- `retry=False`。Harness は再試行していなかった。有料APIの呼び出し回数を増やさない
+- 応答本文は ELF の結果(strip_fence 済み)ではなく raw の text ブロックを連結して返す。
+  応答の解釈は従来どおり各 Agent の `strip_code_fence` に任せる
+- 挙動差1点: 応答が空のとき、ELF は `LLMError("LLM応答が空です")` を送出する
+  (従来は空文字が返り JSON 解析で失敗していた)。Learning ではステータスが
+  `invalid_llm_response` ではなくステップ失敗になる。実害が小さいので吸収していない
+
+**論理モデル。** Agent ごとに `harness-generator / -evaluator / -learning`。
+Harness は Agent ごとに実モデルと max_tokens(learning だけ 2048)が違うため。
+実モデル名は環境変数(`MODEL_GENERATOR` など。Harness の Settings と同名)から解決する。
+Harness の Settings は .env を環境変数に展開しないので、`LlmClient` が Settings の値を
+環境変数へ書き込んでから呼ぶ。API キーは Harness が作った SDK クライアントを
+`Gateway.use_adapter()` で渡す(ELF は API キーの在り処を知らない)。
+単価は Harness の標準単価表と同じ値を `models.yaml` に書いた。以前の
+「環境変数 ELF_PRICE_* で上書き」というコメントは**実装が無い記述**だったので消した。
+
+**ステップの記録。** docs/05 §4.2 の `tr.child(step)` は spans に行を作らない。
+spans は Guard の呼び出し回数とコスト集計の単位で、LLM 以外の行を混ぜると両方が狂うため。
+ステップ内の span の meta に `step` を付け、ステップ一覧(名前・所要時間・成否)は
+traces.meta_json の `steps` に残す。
+
+**スレッド。** Harness は API(BackgroundTasks)とスケジューラが別スレッドで LLM を呼ぶ。
+ELF の SQLite 接続は作ったスレッドでしか使えないので、Harness 側の ELF ハンドルは
+スレッドローカルにした(進行中 trace もスレッドごとになり、並行実行で混ざらない)。
+
+**Guard / 予算。** `calls_per_trace_limit_by_system.harness: 0`。候補数は Harness の
+strategy.yaml が持つので ELF で二重に数えない。有料APIの歯止めは回数ではなく金額で、
+`budgets` に `system=harness` 月20 USD(hard)を設定した(= Harness の月3000円 / 150円)。
+cost_guard(Harness の DB の LlmUsage を見る)と二重防御になる。LlmUsage の記録は従来どおり。
+
+**CI と導入。** ELF は別リポジトリで Harness の CI には入らない。
+- ELF 経由のテスト(6件)は `pytest.importorskip("llmops")` でスキップされる。
+  mypy は `llmops.*` を ignore_missing_imports にした。ELF に `py.typed` を足したので、
+  ELF を入れた環境では Harness の mypy が ELF の型で検査される
+- テストは ELF の記録先を一時DBに差し替える(autouse fixture)。本番の ELF DB を汚さない
+- 導入: `uv pip install --python .venv/bin/python -e <ELF のパス>`。
+  **`uv sync` は既定で余分なパッケージを消す**ので、実行後は入れ直すか `uv sync --inexact` を使う。
+  入っていなければ `LlmClient` は `ElfUnavailableError` で止まる(API を直接叩く経路は残していない)
+
+**確認。** 実 DB のコピー上で、偽の SDK クライアントを使って Harness の生成→評価を1サイクル
+流し、`report cost --by system` に cgmp / dde / elf / harness が並ぶことを確かめた。
+実 DB には流していない(課金を伴う実行と、偽の結果での汚染を避けるため)。
+実 DB に harness の行が載るのは、次にパイプラインが実際に走ったとき。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

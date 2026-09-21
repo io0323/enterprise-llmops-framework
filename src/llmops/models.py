@@ -137,6 +137,10 @@ class CompletionRequest:
     #: publish 前の候補版を評価できないと、評価ゲート自体が成立しないため。
     #: 緩めるのは状態チェックだけで、Guard / Trace / Cost は通常どおり通る
     allow_unpublished: bool = False
+    #: 呼び出し側が「送るつもりの本文」。指定するとレンダリング結果とバイト比較し、
+    #: 違えば LLM を呼ばずに `PromptMismatch`(NOTES.md N-044)。
+    #: 版管理を自前で持つシステムが、ELF の知らない版を黙って送らないための照合
+    expected_text: str | None = None
 
 
 @dataclass(frozen=True)

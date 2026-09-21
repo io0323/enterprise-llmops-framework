@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import TracebackType
@@ -68,11 +69,51 @@ def app_config_path(section: Mapping[str, Any]) -> str | None:
 class TraceContext:
     """`with` で使う。抜けると `finished_at` と status が確定する(設計 §5.1)。"""
 
-    def __init__(self, ops: LLMOps, trace_id: str, operation: str) -> None:
+    def __init__(
+        self,
+        ops: LLMOps,
+        trace_id: str,
+        operation: str,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
         self.ops = ops
         self.trace_id = trace_id
         self.operation = operation
         self.status = SUCCESS
+        self.meta: dict[str, Any] = dict(meta or {})
+        #: `child()` で区切った処理ステップ。終了時に traces.meta_json の `steps` に残す
+        self.steps: list[dict[str, Any]] = []
+        self.current_step: str | None = None
+
+    @contextlib.contextmanager
+    def child(self, name: str) -> Iterator[None]:
+        """trace 内の処理ステップを区切る(docs/05 §4.2 の `tr.child(step.name)`)。
+
+        ステップは LLM 呼び出しではないので **spans には行を作らない**。spans は
+        Guard の呼び出し回数とコスト集計の単位であり、LLM 以外の行を混ぜると
+        両方が狂う(NOTES.md N-044)。代わりに:
+
+        - ステップ内の LLM span の meta に `step` を付ける
+        - ステップ名・所要時間・成否を trace の meta(`steps`)に残す
+        """
+        previous = self.current_step
+        self.current_step = name
+        started = time.monotonic()
+        status = SUCCESS
+        try:
+            yield
+        except BaseException:
+            status = FAILED
+            raise
+        finally:
+            self.current_step = previous
+            self.steps.append(
+                {
+                    "name": name,
+                    "status": status,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                }
+            )
 
     def __enter__(self) -> TraceContext:
         self.ops._push(self)
@@ -86,7 +127,8 @@ class TraceContext:
     ) -> None:
         self.ops._pop(self)
         status = FAILED if exc_type is not None else self.status
-        self.ops.runtime.tracer.end_trace(self.trace_id, status=status)
+        meta = {**self.meta, "steps": self.steps} if self.steps else None
+        self.ops.runtime.tracer.end_trace(self.trace_id, status=status, meta=meta)
 
     def fail(self) -> None:
         """例外を送出せずに失敗として閉じたい場合(部分失敗の記録)。"""
@@ -154,7 +196,7 @@ class LLMOps:
         trace_id = self.runtime.tracer.start_trace(
             operation, external_id=external_id, meta=meta or None
         )
-        return TraceContext(self, trace_id, operation)
+        return TraceContext(self, trace_id, operation, meta)
 
     def _push(self, ctx: TraceContext) -> None:
         self._stack.append(ctx)
@@ -164,8 +206,21 @@ class LLMOps:
             self._stack.remove(ctx)
 
     @property
+    def current_trace(self) -> TraceContext | None:
+        """進行中の trace(`with ops.trace(...)` の内側でのみ値を持つ)。"""
+        return self._stack[-1] if self._stack else None
+
+    @property
     def current_trace_id(self) -> str | None:
         return self._stack[-1].trace_id if self._stack else None
+
+    def _step_meta(self, trace_id: str, meta: Mapping[str, Any] | None) -> dict[str, Any]:
+        """進行中の trace にステップがあれば span の meta に `step` を足す。"""
+        merged = dict(meta or {})
+        ctx = self._stack[-1] if self._stack else None
+        if ctx is not None and ctx.trace_id == trace_id and ctx.current_step is not None:
+            merged.setdefault("step", ctx.current_step)
+        return merged
 
     def _trace_id_for(self, trace_id: str | None) -> str:
         """明示指定 → 進行中の trace → その場で1件作る、の順に決める。"""
@@ -196,15 +251,21 @@ class LLMOps:
         parent_span_id: str | None = None,
         meta: Mapping[str, Any] | None = None,
         allow_unpublished: bool = False,
+        expected_text: str | None = None,
     ) -> CompletionResult:
         """Registry 管理の Prompt を実行する。
 
         `allow_unpublished` は**評価のための例外**。publish 前の候補版を採点する
         ときだけ使う(NOTES.md N-038)。アプリの本番経路では使わない。
+
+        `expected_text` は Prompt の版管理を自前で持つシステム向け。呼び出し側が
+        組み立てた本文を渡すと、ELF のレンダリング結果とバイト比較し、違えば
+        LLM を呼ばずに `PromptMismatch` にする(NOTES.md N-044)。
         """
+        resolved_trace = self._trace_id_for(trace_id)
         return self.runtime.gateway.complete(
             CompletionRequest(
-                trace_id=self._trace_id_for(trace_id),
+                trace_id=resolved_trace,
                 task=task or prompt_id.split(".")[-1],
                 prompt_id=prompt_id,
                 variables=dict(variables),
@@ -213,8 +274,9 @@ class LLMOps:
                 as_json=as_json,
                 attempts=None if retry is not False else 1,
                 parent_span_id=parent_span_id,
-                meta=dict(meta or {}),
+                meta=self._step_meta(resolved_trace, meta),
                 allow_unpublished=allow_unpublished,
+                expected_text=expected_text,
             )
         )
 

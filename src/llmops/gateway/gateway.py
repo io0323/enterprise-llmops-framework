@@ -25,6 +25,7 @@ from llmops.errors import (
     AllProvidersFailed,
     LLMError,
     PolicyViolation,
+    PromptMismatch,
     PromptNotPublished,
 )
 from llmops.guard.quota import Guard
@@ -33,6 +34,7 @@ from llmops.models import CompletionRequest, CompletionResult, SpanEnd
 from llmops.observability.cost import CostTracker
 from llmops.observability.tracer import Tracer
 from llmops.prompt.registry import PUBLISHED, PromptRegistry, ResolvedPrompt
+from llmops.prompt.render import render_hash as hash_text
 from llmops.registry.model_registry import ModelRegistry, ResolvedModel
 
 logger = get_logger(__name__)
@@ -69,6 +71,14 @@ class Gateway:
         if name not in self._adapters:
             self._adapters[name] = get_adapter(name)
         return self._adapters[name]
+
+    def use_adapter(self, adapter: ProviderAdapter) -> None:
+        """構成済みの Adapter を登録する(同名の既定 Adapter を置き換える)。
+
+        利用システムが自前の構成(API キーの在り処など)を持っている場合に使う。
+        Harness が Settings から作った SDK クライアントを渡すのが該当(N-044)。
+        """
+        self._adapters[adapter.name] = adapter
 
     # ------------------------------------------------------------------
     def complete(self, req: CompletionRequest) -> CompletionResult:
@@ -118,6 +128,13 @@ class Gateway:
             self._authorize_unpublished(req, prompt)
 
         rendered = self.prompts.render(prompt, req.variables)
+        if req.expected_text is not None and rendered.text != req.expected_text:
+            raise PromptMismatch(
+                f"{prompt.prompt_id}@{prompt.version} のレンダリング結果が、呼び出し側の"
+                f"本文と一致しません(ELF={rendered.hash} / 呼び出し側="
+                f"{hash_text(req.expected_text)})。ELF に登録されていない版を送ろうと"
+                "しています。prompts/ に登録し、評価を通して publish してから使うこと"
+            )
         return prompt, rendered.text, rendered.hash
 
     def _authorize_unpublished(self, req: CompletionRequest, prompt: ResolvedPrompt) -> None:
