@@ -18,6 +18,11 @@ from llmops.config import Config, load_config
 from llmops.db.connection import table_names
 from llmops.db.repository import Repository
 from llmops.errors import LLMOpsError
+from llmops.eval.closed_loop import add_case_from_span, add_manual_case
+from llmops.eval.gate import PublishGate
+from llmops.eval.regression import MODE_WIRING_CHECK, PASS, WIRING_CHECK
+from llmops.eval.report import eval_run_report, quality_report
+from llmops.eval.runner import EvalRunner
 from llmops.gateway import Runtime
 from llmops.logging_utils import get_logger, setup_logging
 from llmops.models import CompletionRequest
@@ -25,6 +30,7 @@ from llmops.observability.report import cost_report, parse_since
 from llmops.observability.tracer import new_id
 from llmops.prompt import catalog as prompt_catalog
 from llmops.prompt.registry import PromptRegistry
+from llmops.sdk import LLMOps
 
 logger = get_logger(__name__)
 
@@ -42,11 +48,13 @@ model_app = typer.Typer(name="model", help="論理モデルの一覧・疎通確
 trace_app = typer.Typer(name="trace", help="trace / span の参照", no_args_is_help=True)
 report_app = typer.Typer(name="report", help="Markdown レポート", no_args_is_help=True)
 budget_app = typer.Typer(name="budget", help="予算の確認・設定", no_args_is_help=True)
+eval_app = typer.Typer(name="eval", help="評価スイートの実行と回帰ゲート", no_args_is_help=True)
 app.add_typer(prompt_app)
 app.add_typer(model_app)
 app.add_typer(trace_app)
 app.add_typer(report_app)
 app.add_typer(budget_app)
+app.add_typer(eval_app)
 
 CONFIG_OPTION = typer.Option(None, "--config", help="config.yaml のパス")
 
@@ -67,7 +75,12 @@ def _open(config: Config) -> Repository:
 
 
 def _registry(config: Config, repo: Repository) -> PromptRegistry:
-    return PromptRegistry(repo, config.prompts_dir)
+    """publish の評価ゲートを差し込んだ Registry。
+
+    ゲートの実体は `eval/gate.py`。`gateway` は `eval` を import できない
+    (依存の向きの絶対規約)ため、上位である CLI で注入する。
+    """
+    return PromptRegistry(repo, config.prompts_dir, eval_gate=PublishGate(repo))
 
 
 def _copy_missing(src: Path, dst: Path) -> list[Path]:
@@ -307,7 +320,13 @@ def prompt_publish(
     force: bool = typer.Option(False, "--force", help="評価ゲートを飛ばす(監査ログに残る)"),
     config_path: str | None = CONFIG_OPTION,
 ) -> None:
-    """approved → published。ポインタを切り替える(評価ゲートは Phase 2)。"""
+    """approved → published。ポインタを切り替える。
+
+    評価ゲート(Step 2-4)を通らないと publish できない。`--force` で飛ばせるが、
+    そのときは `--reason` が必須で、監査ログに `prompt.publish.forced` が残る。
+    """
+    if force and not reason:
+        raise typer.BadParameter("--force を使うときは --reason で理由を必ず書いてください")
     _transition_command("publish", prompt_id, version, reason, config_path, force=force)
 
 
@@ -670,3 +689,178 @@ def audit_tail(
             f"{row['created_at']} {row['event']:22} actor={row['actor']} "
             f"subject={row['subject']} {row['detail_json'] or ''}"
         )
+
+
+# ---------------------------------------------------------------------------
+# eval(Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _runner(config: Config) -> tuple[Runtime, EvalRunner]:
+    runtime = Runtime.build(config)
+    ops = LLMOps.from_runtime(runtime)
+    return runtime, EvalRunner(runtime, ops)
+
+
+@eval_app.command("list")
+def eval_list(config_path: str | None = CONFIG_OPTION) -> None:
+    """評価スイートの一覧(ケース数と出自内訳つき)。"""
+    config = _load(config_path)
+    runtime, runner = _runner(config)
+    try:
+        suites = runner.load_suites()
+        rows = [
+            (suite, runtime.repo.count_eval_cases_by_origin(suite.id)) for suite in suites.values()
+        ]
+    finally:
+        runtime.close()
+
+    if not rows:
+        typer.echo(f"評価スイートがありません({config.evals_dir}/*.yaml)")
+        return
+    for suite, origins in rows:
+        total = sum(origins.values())
+        breakdown = " ".join(f"{k}={v}" for k, v in sorted(origins.items())) or "ケースなし"
+        judged = ", ".join(m.metric for m in suite.judge) or "(決定的評価のみ)"
+        typer.echo(f"{suite.id:24} prompt={suite.prompt_id:24} cases={total} [{breakdown}]")
+        typer.echo(f"{'':24} judge={judged}")
+
+
+@eval_app.command("run")
+def eval_run(
+    suite_id: str,
+    version: int | None = typer.Option(None, "--version", help="評価する Prompt 版"),
+    model: str | None = typer.Option(None, "--model", help="生成に使う論理モデル"),
+    judge_model: str | None = typer.Option(None, "--judge-model"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """スイートを実行する。verdict が pass 以外なら非ゼロ終了する。"""
+    config = _load(config_path)
+    runtime, runner = _runner(config)
+    try:
+        runner.sync()
+        outcome = runner.run(suite_id, version=version, model=model, judge_model=judge_model)
+    finally:
+        runtime.close()
+
+    typer.echo(f"run: {outcome.run_id}")
+    typer.echo(f"{outcome.suite_id} / {outcome.prompt_id}@{outcome.prompt_version}")
+    if outcome.mode == MODE_WIRING_CHECK:
+        typer.echo(
+            "*** 配線確認モード(mock Adapter 経由)。この結果は品質の判定に使えません。"
+            "baseline にも publish の根拠にもなりません ***"
+        )
+    score = "なし(採点できず)" if outcome.score is None else f"{outcome.score:.4f}"
+    typer.echo(
+        f"verdict={outcome.verdict} score={score} "
+        f"決定的評価 {outcome.passed}/{outcome.total} 件合格 "
+        f"採点失敗 {outcome.errors} 件 degraded {outcome.degraded_spans} 件 "
+        f"cost={outcome.cost_usd:.6f} USD"
+    )
+    typer.echo(f"理由: {outcome.reason}")
+    for case in outcome.cases:
+        mark = "ok  " if case.deterministic_passed else "NG  "
+        detail = "" if not case.failed_rules else f" 違反={', '.join(case.failed_rules)}"
+        case_score = "-" if case.score is None else f"{case.score:.3f}"
+        typer.echo(f"  {mark} {case.name:28} score={case_score}{detail}")
+        for error in case.errors:
+            typer.echo(f"       採点失敗: {error}")
+    # 配線確認は「品質判定をしていない」だけで異常ではないので 0 で返す。
+    # ただし publish ゲートは verdict=='pass' しか通さないので、公開の根拠にはならない
+    if outcome.verdict not in (PASS, WIRING_CHECK):
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("report")
+def eval_report(
+    run_id: str,
+    out: str | None = typer.Option(None, "--out", help="Markdown の出力先"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """1 run の詳細レポート(Markdown)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        markdown = eval_run_report(repo, run_id)
+    finally:
+        repo.close()
+
+    if out is None:
+        typer.echo(markdown)
+        return
+    path = Path(out)
+    if not path.is_absolute():
+        path = config.report_dir / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    typer.echo(f"written: {path}")
+
+
+@eval_app.command("add-case")
+def eval_add_case(
+    suite_id: str,
+    from_span: str | None = typer.Option(None, "--from-span", help="本番の span_id"),
+    vars_file: str | None = typer.Option(None, "--vars", help="変数を入れた JSON ファイル"),
+    name: str | None = typer.Option(None, "--name", help="ケース名"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """評価ケースを追加する。
+
+    `--from-span` が**閉ループの要**(Step 2-5)。本番の失敗を回帰ケースに変換する。
+    これが回らないと評価スイートは数ヶ月で陳腐化する。週1件でも追加すること。
+    `--vars` は初期ケースを手で置くための入口(origin=manual)。
+    """
+    if (from_span is None) == (vars_file is None):
+        raise typer.BadParameter("--from-span か --vars のどちらか一方を指定してください")
+
+    config = _load(config_path)
+    runtime, runner = _runner(config)
+    try:
+        runner.sync()
+        if from_span is not None:
+            case = add_case_from_span(runtime, suite_id, from_span, name=name)
+            origin = "production-failure"
+        else:
+            case = add_manual_case(
+                runtime,
+                suite_id,
+                _load_vars(vars_file),
+                name=name or Path(str(vars_file)).stem,
+            )
+            origin = "manual"
+    finally:
+        runtime.close()
+
+    typer.echo(f"追加しました: {case.name} (id={case.case_id})")
+    typer.echo(f"  suite={suite_id} origin={origin}")
+    if case.missing_variables:
+        typer.echo(
+            "  注意: span から復元できなかった変数があります: "
+            + ", ".join(case.missing_variables)
+        )
+        typer.echo("  ケースの vars を手で補ってください(空文字で登録しています)")
+
+
+@report_app.command("quality")
+def report_quality(
+    since: str = typer.Option("7d", "--since", help="7d / 24h / 2026-09-01"),
+    out: str | None = typer.Option(None, "--out", help="Markdown の出力先"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """品質レポート(評価の推移と、評価基盤自体の健全性)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        markdown = quality_report(repo, since=_sql_time(parse_since(since)))
+    finally:
+        repo.close()
+
+    if out is None:
+        typer.echo(markdown)
+        return
+    path = Path(out)
+    if not path.is_absolute():
+        path = config.report_dir / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    typer.echo(f"written: {path}")

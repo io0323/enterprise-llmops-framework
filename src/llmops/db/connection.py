@@ -36,8 +36,58 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+#: 既存DBへ後から足した列(表, 列, 型定義)。
+#: `CREATE TABLE IF NOT EXISTS` は**既存の表に列を足さない**ため、明示的に当てる。
+#: 追加は常に nullable か定数 DEFAULT にすること(SQLite の ALTER の制約)。
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # Phase 2: 評価の健全性を後から選別できるようにするための列(NOTES.md N-033)
+    ("eval_runs", "mode", "TEXT NOT NULL DEFAULT 'evaluation'"),
+    ("eval_runs", "trace_id", "TEXT"),
+    ("eval_runs", "judge_model", "TEXT"),
+    ("eval_runs", "errors", "INTEGER NOT NULL DEFAULT 0"),
+    ("eval_runs", "degraded_spans", "INTEGER NOT NULL DEFAULT 0"),
+    ("eval_runs", "note", "TEXT"),
+    ("eval_results", "kind", "TEXT NOT NULL DEFAULT 'deterministic'"),
+    ("eval_results", "status", "TEXT NOT NULL DEFAULT 'ok'"),
+    # created_at は CURRENT_TIMESTAMP を既定にできない(ALTER の制約)。
+    # 書き込み側が必ず明示的に入れるので既定なしで足す
+    ("eval_results", "created_at", "TIMESTAMP"),
+)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def apply_migrations(conn: sqlite3.Connection) -> list[str]:
+    """不足している列を足す。既にあれば何もしない(冪等)。"""
+    applied: list[str] = []
+    for table, column, decl in MIGRATIONS:
+        if not _table_exists(conn, table):
+            continue  # この後の schema.sql が列つきで作る
+        if column in _column_names(conn, table):
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        applied.append(f"{table}.{column}")
+    if applied:
+        conn.commit()
+    return applied
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
-    """schema.sql を適用する(CREATE ... IF NOT EXISTS のため冪等)。"""
+    """schema.sql を適用する(CREATE ... IF NOT EXISTS のため冪等)。
+
+    既存DBには先に不足列を足してから流す。ELF の DB は ELF 自身のものなので
+    変更してよい(絶対ルール1 が守るのは既存5システムの DB)。
+    """
+    apply_migrations(conn)
     conn.executescript(read_schema())
     conn.commit()
 

@@ -324,6 +324,66 @@ status は span の成否から導出する(全部成功なら success、1つで
 常駐プロセス(Harness)は `ops.trace()` のコンテキストマネージャを使うため、
 この経路には乗らない。
 
+### N-033 `eval_runs` / `eval_results` に列を足した(設計 §2.5 に無いもの)
+Phase 2 の設計判断は全て「**偽の合格を作らない**」に寄せた(N-026 の教訓)。
+そのために「後から選別できる」情報を列として持たせた:
+
+| 表 | 列 | 何のため |
+|---|---|---|
+| eval_runs | `mode` | 配線確認(mock 経由)の run を baseline / publish 根拠から外す |
+| eval_runs | `trace_id` | degraded と実コストを spans から導出する |
+| eval_runs | `judge_model` | 誰が採点したかを残す |
+| eval_runs | `errors` | 採点できなかった件数(平均から除外した数) |
+| eval_runs | `degraded_spans` | 縮退実行が混ざった run を後から特定する |
+| eval_runs | `note` | verdict の理由(なぜ止めたか) |
+| eval_results | `kind` | 決定的評価と Judge を混ぜて平均しない |
+| eval_results | `status` | `error`(採点できなかった)と スコア0 を区別する |
+
+`CREATE TABLE IF NOT EXISTS` は既存の表に列を足さないので、
+`db/connection.py` に明示的なマイグレーション表(`MIGRATIONS`)を置いた。
+ELF の DB は ELF 自身のものなので変更してよい(絶対ルール1 が守るのは既存5システムの DB)。
+
+### N-034 配線確認(mock 経由)の run に専用の verdict を作った
+「mock を評価経路に入れさせない」という要求に対し、当初は `fail` にしていたが、
+`fail` は「品質が悪い」と読まれる。実態は**「品質を判定していない」**なので、
+`verdict='wiring_check'` という別の値にした。
+
+- publish ゲートは `verdict == 'pass'` のみを通すので、公開の根拠にはならない
+- `latest_eval_run` は `mode='evaluation'` で絞るので、baseline にもならない
+- CLI の終了コードは 0(配線は動いているため)。ただし出力に大きく明示する
+
+**2重に塞いである**(verdict と mode)。片方を将来変えても、もう片方が残る。
+
+### N-035 カバレッジ計測対象に `llmops.eval` を足した
+N-012 で「CLAUDE.md の規定どおり gateway / prompt / registry の3つ」に絞ったが、
+Phase 2 で追加した `eval` は**「偽の合格を作らない」ことが仕事**のモジュールであり、
+ここが緩むと Phase 2 全体が無意味になる。規定の意図(移行・公開の安全網を厚くする)に
+照らして対象に入れた。現在 93%。
+
+### N-036 Judge の応答は「スキーマ検証まで通って初めて成功」にした
+N-026 の直接原因は、`extract_json` が **Prompt 内の出力例 JSON** を拾ったこと。
+「JSON として読めた」を成功とすると、同じ事故が評価基盤で再発する。
+
+`eval/judge.py::parse_judge_payload` は次を全て満たしたときだけスコアを作る:
+
+- オブジェクトであること(1要素の配列は実機で頻出するので解いて許す。2要素以上は拒否)
+- `score` が**数値**であること(`bool` は除く。文字列 "0.0〜1.0の数値" は拒否)
+- `score` が 0.0-1.0 の範囲にあること
+- `reason` が空でないこと(理由の無いスコアは改善に使えない)
+
+満たさない場合は採点**失敗**として `eval_results.status='error'` に記録し、
+**スコアの平均から除外する**(0点にしない)。run は止めない。
+`tests/test_eval_judge.py` に、N-026 で実際に通ってしまった rubric の出力例を
+「採点にならない」ことの回帰テストとして入れてある。
+
+### N-037 Judge が落ちても代替モデルへ逃がさない
+`eval.forbid_judge_fallback: true`(既定)で、judge 論理モデルに `fallback_to` が
+設定されていたら**評価の実行そのものを拒否**する。
+
+理由: 代替モデルで穴埋めされたスコアは「誰が採点したか」が分からない。
+`eval_runs.judge_model` に記録した値と実際の採点者が食い違う記録は、
+比較の土台として使えない。黙って別モデルの点数を採用するくらいなら実行しない。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

@@ -1,0 +1,16 @@
+# ELF 自身の配線確認用スイート。mock Adapter を通るので
+# `llmops eval run elf-smoke` は必ず「配線確認モード」になる(品質判定には使えない)。
+id: elf-smoke
+prompt_id: elf.smoke
+model: mock-echo
+
+deterministic:
+  - type: non_empty
+  - type: max_chars
+    value: 2000
+  - type: forbidden_patterns
+    patterns: ["```"]
+
+thresholds:
+  deterministic_pass_rate: 1.0
+  min_score: 0.0

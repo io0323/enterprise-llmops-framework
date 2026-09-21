@@ -23,6 +23,8 @@ guard:
     # DDE は「1ラン = 1 trace」で、1ランに expand / classify / cluster_naming が
     # 何十回も入る。記事単位の上限を持たないシステムなので上限を外す(NOTES.md N-023)
     dde: 0
+    # ELF 自身(評価実行)。1 run = 1 trace で、ケース数 × (生成 + Judge) ぶん呼ぶ
+    elf: 0
   hard_quota: true
 
 budget:
@@ -40,6 +42,11 @@ eval:
   judge_model: judge
   regression_tolerance: 0.02      # ベースライン比でこれを超える低下を regressed とする
   deterministic_first: true       # 決定的評価が落ちたら Judge を呼ばない
+  min_score: 0.75                 # スイート側で上書き可。ベースラインが無い初版の判定に使う
+  # 評価系の安全装置(NOTES.md N-026 の再発防止)。いずれも既定で有効にする
+  forbid_judge_fallback: true     # judge 論理モデルに fallback_to があれば実行を拒否する
+  fail_on_degraded: true          # degraded=1 の span が混ざった run は無条件で fail
+  mock_is_wiring_check: true      # mock を通った run は baseline にしない(配線確認扱い)
 
 logging:
   level: INFO

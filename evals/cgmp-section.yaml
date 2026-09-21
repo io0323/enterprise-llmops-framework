@@ -1,0 +1,40 @@
+# CGMP の本文セクション生成。Phase 1 で prompts/cgmp/section.md へ外部化済み。
+id: cgmp-section
+prompt_id: cgmp.section
+model: chat-standard
+judge_model: judge
+task: section
+
+# 決定的評価(純コード。これが落ちたら Judge へ進まない)
+deterministic:
+  - type: non_empty
+  - type: max_chars
+    value: 1800                  # front matter の目安 1200字 + 余裕
+  - type: forbidden_patterns
+    # 本文にフェンス・URL・見出し行を出させない(CGMP の既存制約)
+    patterns: ["```", "http://", "https://", "\n## "]
+  - type: no_outside_context     # constraints.forbid_outside_context の機械検証
+    context_var: context
+    # 誤検出は allowlist で潰す。潰しすぎると検査が形骸化するので、
+    # 「何度も出る一般語」だけを入れること
+    allowlist:
+      - Claude
+      - Code
+      - Markdown
+
+# LLM-as-Judge(決定的評価を通ったケースのみ)
+judge:
+  - metric: groundedness
+    prompt_id: judge.groundedness
+    weight: 0.5
+  - metric: relevance
+    prompt_id: judge.relevance
+    weight: 0.3
+  - metric: readability
+    prompt_id: judge.readability
+    weight: 0.2
+
+thresholds:
+  deterministic_pass_rate: 1.0   # 決定的評価は全件合格が必須
+  min_score: 0.75
+  regression_tolerance: 0.02

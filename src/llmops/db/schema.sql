@@ -167,11 +167,24 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     passed         INTEGER NOT NULL,
     score          REAL,                     -- 0.0-1.0
     baseline_run_id TEXT,
-    verdict        TEXT NOT NULL,            -- pass/fail/regressed
+    verdict        TEXT NOT NULL,            -- pass/fail/regressed/error
     cost_usd       REAL,
     started_at     TIMESTAMP,
-    finished_at    TIMESTAMP
+    finished_at    TIMESTAMP,
+    -- 設計 §2.5 に無い追加列(NOTES.md N-033)。いずれも
+    -- 「偽の合格を作らせない」ために、後から選別できる形で残すもの
+    --   mode: 'evaluation' / 'wiring_check'(mock を通った run。baseline にしない)
+    mode           TEXT NOT NULL DEFAULT 'evaluation',
+    --   trace_id: この run の LLM 呼び出しを束ねる trace。degraded と実コストを導出する
+    trace_id       TEXT,
+    judge_model    TEXT,
+    --   errors: Judge のパース失敗など「採点できなかった」件数。平均から除外した数
+    errors         INTEGER NOT NULL DEFAULT 0,
+    --   degraded_spans: 縮退実行(Fallback)で得た span の数。1以上なら verdict は fail
+    degraded_spans INTEGER NOT NULL DEFAULT 0,
+    note           TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_eval_runs_prompt ON eval_runs(prompt_id, prompt_version);
 
 CREATE TABLE IF NOT EXISTS eval_results (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,8 +194,15 @@ CREATE TABLE IF NOT EXISTS eval_results (
     score       REAL,
     passed      INTEGER NOT NULL,
     detail      TEXT,
-    span_id     TEXT                         -- 評価のためのLLM呼び出し
+    span_id     TEXT,                        -- 評価のためのLLM呼び出し
+    -- 設計 §2.5 に無い追加列(NOTES.md N-033)
+    --   kind: 'deterministic' / 'judge'。決定的評価と Judge を混ぜて平均しないため
+    kind        TEXT NOT NULL DEFAULT 'deterministic',
+    --   status: 'ok' / 'error'。error は「採点できなかった」。スコア0とは別物
+    status      TEXT NOT NULL DEFAULT 'ok',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id, case_id);
 
 -- ============ §2.6 Governance(Phase 3)============
 CREATE TABLE IF NOT EXISTS asset_catalog (

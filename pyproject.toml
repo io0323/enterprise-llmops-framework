@@ -52,9 +52,11 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 # CLAUDE.md のカバレッジ規定は gateway / prompt / registry の3つ。計測対象をそこに絞る。
-# llmops 全体を対象にすると、Phase 1 では空のままの eval/ governance/ を埋めるためだけの
-# テストを書く圧力が生まれ、規定の意図から外れる(NOTES.md N-012)。
-source = ["llmops.gateway", "llmops.prompt", "llmops.registry"]
+# llmops 全体を対象にすると、空のままのパッケージを埋めるためだけのテストを書く
+# 圧力が生まれ、規定の意図から外れる(NOTES.md N-012)。
+# Phase 2 で eval を追加した。評価基盤は「偽の合格を作らない」ことが仕事なので、
+# 安全網の対象に入れる(NOTES.md N-035)。
+source = ["llmops.gateway", "llmops.prompt", "llmops.registry", "llmops.eval"]
 
 [tool.coverage.report]
 fail_under = 80

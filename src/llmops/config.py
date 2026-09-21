@@ -79,6 +79,17 @@ class EvalConfig(_Base):
     judge_model: str = "judge"
     regression_tolerance: float = 0.02
     deterministic_first: bool = True
+    min_score: float = 0.75
+
+    # --- 評価系の安全装置(NOTES.md N-026 の再発防止)------------------------
+    #: judge 論理モデルに fallback_to があれば評価の実行を拒否する。
+    #: 代替モデルで穴埋めされたスコアは「誰が採点したか」が分からず使えない
+    forbid_judge_fallback: bool = True
+    #: degraded=1(Fallback 経由)の span が混ざった run は無条件で fail にする。
+    #: 縮退実行の結果で品質を判定しない
+    fail_on_degraded: bool = True
+    #: mock Adapter を通った run は baseline にしない(配線確認モードとして扱う)
+    mock_is_wiring_check: bool = True
 
 
 class LoggingConfig(_Base):

@@ -565,3 +565,217 @@ class Repository:
             (key, key),
         ).fetchone()
         return cast("sqlite3.Row | None", row)
+
+    # ------------------------------------------------------------------
+    # eval_suites / eval_cases(Phase 2)
+    # ------------------------------------------------------------------
+    def upsert_eval_suite(
+        self, *, suite_id: str, prompt_id: str, definition: str, thresholds_json: str
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO eval_suites (id, prompt_id, definition, thresholds_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                prompt_id = excluded.prompt_id,
+                definition = excluded.definition,
+                thresholds_json = excluded.thresholds_json,
+                updated_at = excluded.updated_at
+            """,
+            (suite_id, prompt_id, definition, thresholds_json, utcnow()),
+        )
+        self.conn.commit()
+
+    def get_eval_suite(self, suite_id: str) -> sqlite3.Row | None:
+        row = self.conn.execute("SELECT * FROM eval_suites WHERE id = ?", (suite_id,)).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def list_eval_suites(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM eval_suites ORDER BY id").fetchall())
+
+    def insert_eval_case(
+        self,
+        *,
+        case_id: str,
+        suite_id: str,
+        name: str,
+        vars_json: str,
+        expect_json: str | None = None,
+        origin: str = "manual",
+        source_span_id: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO eval_cases
+                (id, suite_id, name, vars_json, expect_json, origin, source_span_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (case_id, suite_id, name, vars_json, expect_json, origin, source_span_id, utcnow()),
+        )
+        self.conn.commit()
+
+    def list_eval_cases(self, suite_id: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM eval_cases WHERE suite_id = ? ORDER BY created_at, id", (suite_id,)
+            ).fetchall()
+        )
+
+    def count_eval_cases_by_origin(self, suite_id: str) -> dict[str, int]:
+        """ケースの出自内訳(閉ループが回っているかの指標。Step 2-5)。"""
+        rows = self.conn.execute(
+            "SELECT COALESCE(origin, 'manual') AS origin, COUNT(*) AS n"
+            " FROM eval_cases WHERE suite_id = ? GROUP BY 1",
+            (suite_id,),
+        ).fetchall()
+        return {str(row["origin"]): int(row["n"]) for row in rows}
+
+    def case_exists_for_span(self, suite_id: str, span_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM eval_cases WHERE suite_id = ? AND source_span_id = ?",
+            (suite_id, span_id),
+        ).fetchone()
+        return row is not None
+
+    # ------------------------------------------------------------------
+    # eval_runs / eval_results(Phase 2)
+    # ------------------------------------------------------------------
+    def insert_eval_run(
+        self,
+        *,
+        run_id: str,
+        suite_id: str,
+        prompt_id: str,
+        prompt_version: int,
+        logical_model: str,
+        judge_model: str | None,
+        total: int,
+        mode: str,
+        trace_id: str | None,
+    ) -> None:
+        """開始時点で1行入れる(span と同じ考え方。途中で落ちても「走らせた」記録が残る)。"""
+        self.conn.execute(
+            """
+            INSERT INTO eval_runs (
+                id, suite_id, prompt_id, prompt_version, logical_model, judge_model,
+                total, passed, verdict, mode, trace_id, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'running', ?, ?, ?)
+            """,
+            (
+                run_id, suite_id, prompt_id, prompt_version, logical_model, judge_model,
+                total, mode, trace_id, utcnow(),
+            ),
+        )
+        self.conn.commit()
+
+    def finish_eval_run(
+        self,
+        run_id: str,
+        *,
+        passed: int,
+        score: float | None,
+        verdict: str,
+        baseline_run_id: str | None,
+        cost_usd: float,
+        errors: int,
+        degraded_spans: int,
+        note: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE eval_runs SET
+                passed = ?, score = ?, verdict = ?, baseline_run_id = ?,
+                cost_usd = ?, errors = ?, degraded_spans = ?, note = ?, finished_at = ?
+            WHERE id = ?
+            """,
+            (
+                passed, score, verdict, baseline_run_id, cost_usd, errors,
+                degraded_spans, note, utcnow(), run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def get_eval_run(self, run_id: str) -> sqlite3.Row | None:
+        row = self.conn.execute("SELECT * FROM eval_runs WHERE id = ?", (run_id,)).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def list_eval_runs(
+        self, *, suite_id: str | None = None, limit: int = 20
+    ) -> list[sqlite3.Row]:
+        if suite_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM eval_runs ORDER BY started_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM eval_runs WHERE suite_id = ? ORDER BY started_at DESC LIMIT ?",
+                (suite_id, limit),
+            ).fetchall()
+        return list(rows)
+
+    def latest_eval_run(
+        self, prompt_id: str, version: int, *, mode: str = "evaluation"
+    ) -> sqlite3.Row | None:
+        """ある版に対する最新の評価実行。
+
+        `mode` で絞るのは、配線確認(mock を通った run)を baseline や
+        publish の根拠にしないため(NOTES.md N-034)。
+        """
+        row = self.conn.execute(
+            """
+            SELECT * FROM eval_runs
+             WHERE prompt_id = ? AND prompt_version = ? AND mode = ? AND verdict != 'running'
+             ORDER BY started_at DESC LIMIT 1
+            """,
+            (prompt_id, version, mode),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def insert_eval_result(
+        self,
+        *,
+        run_id: str,
+        case_id: str,
+        metric: str,
+        kind: str,
+        passed: bool,
+        status: str = "ok",
+        score: float | None = None,
+        detail: str | None = None,
+        span_id: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO eval_results
+                (run_id, case_id, metric, score, passed, detail, span_id, kind, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id, case_id, metric, score, 1 if passed else 0, detail, span_id,
+                kind, status, utcnow(),
+            ),
+        )
+        self.conn.commit()
+
+    def list_eval_results(self, run_id: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM eval_results WHERE run_id = ? ORDER BY id", (run_id,)
+            ).fetchall()
+        )
+
+    # ------------------------------------------------------------------
+    # trace からの導出(評価の健全性チェック)
+    # ------------------------------------------------------------------
+    def trace_totals(self, trace_id: str) -> tuple[float, int]:
+        """(コスト合計, degraded な span の数)。
+
+        degraded が1件でもあれば、その run は縮退実行の結果を含む。
+        品質判定に使ってはいけない(NOTES.md N-026)。
+        """
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS cost,"
+            " COALESCE(SUM(degraded), 0) AS degraded FROM spans WHERE trace_id = ?",
+            (trace_id,),
+        ).fetchone()
+        return float(row["cost"]), int(row["degraded"])
