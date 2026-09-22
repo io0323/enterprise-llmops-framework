@@ -1,0 +1,44 @@
+[
+  {
+    "name": "harness_generator",
+    "prompt_id": "harness.generator",
+    "variables": {
+      "product_json": "{\"name\": \"北海道産 生チョコレート 詰め合わせ\", \"genre_name\": \"スイーツ\", \"shop_name\": \"テスト菓子店\"}",
+      "improvement": ""
+    }
+  },
+  {
+    "name": "harness_generator_with_hint",
+    "prompt_id": "harness.generator",
+    "variables": {
+      "product_json": "{\"name\": \"北海道産 生チョコレート 詰め合わせ\", \"genre_name\": \"スイーツ\", \"shop_name\": \"テスト菓子店\"}",
+      "improvement": "\n\n# 改善指示\ndescription が80〜150文字の範囲外です(62文字); x_post に #ad が含まれていません\n上記の指示を反映して再生成してください。"
+    }
+  },
+  {
+    "name": "harness_evaluator",
+    "prompt_id": "harness.evaluator",
+    "variables": {
+      "content_json": "{\"title\": \"とろける生チョコ\", \"description\": \"仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。\", \"hashtags\": [\"#楽天ROOM\", \"#スイーツ\", \"#チョコレート\", \"#ご褒美\", \"#おうち時間\"], \"x_post\": \"とろける口どけの生チョコ #ad\", \"cta\": \"詳細はこちら\"}",
+      "recent_posts": "先週の投稿: 焼き菓子セット\n先々週の投稿: 紅茶ギフト"
+    }
+  },
+  {
+    "name": "harness_evaluator_no_recent",
+    "prompt_id": "harness.evaluator",
+    "variables": {
+      "content_json": "{\"title\": \"とろける生チョコ\", \"description\": \"仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。仕事終わりの一息に。\", \"hashtags\": [\"#楽天ROOM\", \"#スイーツ\", \"#チョコレート\", \"#ご褒美\", \"#おうち時間\"], \"x_post\": \"とろける口どけの生チョコ #ad\", \"cta\": \"詳細はこちら\"}",
+      "recent_posts": "(過去投稿なし)"
+    }
+  },
+  {
+    "name": "harness_learning",
+    "prompt_id": "harness.learning",
+    "variables": {
+      "data_point_count": 42,
+      "high_group_json": "{\"count\": 10, \"avg_revenue\": 1200.5, \"genre_distribution\": {\"スイーツ\": 6, \"雑貨\": 4}}",
+      "low_group_json": "{\"count\": 10, \"avg_revenue\": 80.0, \"genre_distribution\": {\"家電\": 10}}",
+      "current_generator_prompt": "あなたは楽天ROOMで商品を紹介するコンテンツライターです。\n以下の商品情報から投稿コンテンツをJSONで生成してください。\n\n# 制約\n- description: 80〜150文字。利用シーンを1つ具体的に描く。一人称の体験談を捏造しない\n- title: 30文字以内\n- hashtags: 5〜8個。商品カテゴリ+利用シーン+「#楽天ROOM」を含む\n- x_post: 120文字以内(URL除く)。末尾に #ad を含める\n- cta: 20文字以内\n- 禁止: 価格・ポイント倍率・在庫の記載 / 「最安」「No.1」「絶対」「必ず」等の断定 /\n  医薬品的効能(「治る」「痩せる」等)/ 誇大表現\n- 文体: 自然で押し付けがましくない。絵文字は2個まで\n\n# 商品情報\n{product_json}\n\n# 出力(JSONのみ、コードフェンス不要)\n{\"title\": \"\", \"description\": \"\", \"hashtags\": [], \"x_post\": \"\", \"cta\": \"\"}\n"
+    }
+  }
+]

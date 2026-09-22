@@ -100,6 +100,15 @@ class InvalidTransition(PromptError):
     """Prompt 状態機械が許可しない遷移。"""
 
 
+class PromptMismatch(PromptError):
+    """Registry のレンダリング結果が、呼び出し側の想定本文と一致しない。
+
+    設計 §10 に無い追加(NOTES.md N-044)。Prompt の版管理を自前で持つシステム
+    (Harness の prompt_versions)が、ELF に登録されていない版を送ろうとしたときに出る。
+    **LLM を呼ぶ前**に送出するため、課金も span も発生しない。
+    """
+
+
 # --- Model / Policy / Evaluation --------------------------------------------
 
 

@@ -37,12 +37,21 @@ def _load_sdk() -> Any:
 class AnthropicSdkAdapter(ProviderAdapter):
     name = "anthropic_sdk"
 
+    def __init__(self, client: Any | None = None) -> None:
+        """`client` は利用システムが構成済みの SDK クライアント(任意)。
+
+        Harness は API キーを自前の Settings(.env)から渡して SDK クライアントを作っている。
+        その構成をそのまま使えるように受け取る(ELF が API キーの在り処を知らずに済む)。
+        渡されなければ呼び出し時に SDK の既定(環境変数)で生成する。
+        """
+        self._client = client
+
     def invoke(self, req: AdapterRequest) -> AdapterResponse:
-        sdk = _load_sdk()
+        # SDK の有無を先に見る(未インストールを「環境変数が無い」と取り違えさせない)
+        client = self._client if self._client is not None else _load_sdk().Anthropic()
         model = self._model(req.params)
         max_tokens = int(req.params.get("max_tokens", DEFAULT_MAX_TOKENS))
 
-        client = sdk.Anthropic()
         try:
             message = client.messages.create(
                 model=model,
@@ -92,7 +101,8 @@ class AnthropicSdkAdapter(ProviderAdapter):
                 result = method()
                 if isinstance(result, dict):
                     return result
-        return {"repr": repr(message)}
+        plain = _plain(message)
+        return plain if isinstance(plain, dict) else {"repr": repr(message)}
 
     @staticmethod
     def _text_of(raw: dict[str, Any]) -> str:
@@ -105,8 +115,28 @@ class AnthropicSdkAdapter(ProviderAdapter):
         return "".join(parts)
 
     def health(self) -> bool:
+        if self._client is not None:
+            return True
         try:
             _load_sdk()
         except AdapterUnavailable:
             return False
         return True
+
+
+def _plain(value: Any) -> Any:
+    """属性アクセス型の応答(SDK の型を持たないオブジェクト)を dict / list に落とす。
+
+    SDK のバージョンによっては `model_dump` を持たない応答型がありうる。
+    その場合でも `content` / `usage` を取り出せるようにする(応答形の差で落とさない)。
+    """
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(item) for item in value]
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    attrs = getattr(value, "__dict__", None)
+    if isinstance(attrs, dict):
+        return {str(k): _plain(v) for k, v in attrs.items() if not str(k).startswith("_")}
+    return repr(value)

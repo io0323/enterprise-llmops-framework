@@ -1,8 +1,15 @@
 # 論理モデル定義。実モデル名・Provider製品名をここに書かない(CLAUDE.md 絶対ルール13)。
+#
+# billable: 実際に課金が発生するか。予算(budgets)が見るのは true のものだけ。
+#   claude_cli は subscription 利用で、span に載るコストは `total_cost_usd` の換算値。
+#   追加請求が無いので false。混ぜると「課金していない処理が課金している処理を
+#   止める」状態になる(NOTES.md N-045)。false でも記録とレポートには載る。
+#   未宣言のときは adapter から決まり、既定は **true(課金される)側**。
 # 内容を変更すると config_hash が変わり、llmops sync が自動で新 version を採番する。
 models:
   chat-standard:
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 600
@@ -14,6 +21,7 @@ models:
 
   chat-fast:
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 180
@@ -23,6 +31,7 @@ models:
     # DDE の 50件バッチ分類用。移行時に挙動を変えないため、
     # 既存 demand-discovery-engine/config.yaml の timeout_sec: 300 をそのまま踏襲する。
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 300
@@ -32,6 +41,7 @@ models:
   judge:
     # 評価用。本番生成と分離しておく(自己評価バイアスの回避 / 将来の差し替え余地)
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 300
@@ -42,21 +52,47 @@ models:
     # mock(echo)はプロンプトをそのまま返すため、JSON例を含むプロンプトだと
     # 「それらしい結果」が通ってしまう(NOTES.md N-026 で実際に起きた)
     adapter: mock
+    billable: false            # mock。課金しない
     params: {mode: echo}
 
   mock-echo:
     # 動作確認・テスト専用
     adapter: mock
+    billable: false            # mock。課金しない
     params: {mode: echo}
 
+  # --- Harness(shopping-sns-auto-operation)--------------------------------
+  # Harness は有料APIを使う唯一のシステム(docs/05 §4)。ELF が課金を増やすのではなく、
+  # 既存の呼び出しを記録・制限するためにある(要件定義 §制約1)。
+  # optional extra `sdk-anthropic` が入っている環境でのみ解決可能。
+  #
+  # - 実モデル名は環境変数から取る(絶対ルール13)。変数名は Harness の Settings
+  #   (model_generator / model_evaluator / model_learning)と同じにしてある。
+  #   Harness 側は .env の値を起動時に環境変数へ渡す(NOTES.md N-044)
+  # - max_tokens は Harness の既存呼び出しを踏襲(learning だけ 2048)
+  # - price は Harness の標準単価表と同じ値(USD / 1k tokens)。
+  #   環境変数で実モデルを差し替えたら、ここも合わせて直すこと
+  # - fallback_to は設定しない(N-026)。有料APIの代替先を黙って切り替えない
   harness-generator:
-    # optional extra `sdk-anthropic` が入っている環境でのみ解決可能。
-    # 実モデル名は環境変数から取る。
     adapter: anthropic_sdk
+    billable: true             # 実課金。予算(budgets)の対象
     params:
-      model_env: ANTHROPIC_MODEL
-      max_tokens: 4096
-    price:
-      input_per_1k: 0.0           # 実費は環境変数 ELF_PRICE_IN / ELF_PRICE_OUT で上書き
-      output_per_1k: 0.0
-    status: active
+      model_env: MODEL_GENERATOR
+      max_tokens: 1024
+    price: {input_per_1k: 0.003, output_per_1k: 0.015}
+
+  harness-evaluator:
+    adapter: anthropic_sdk
+    billable: true             # 実課金。予算(budgets)の対象
+    params:
+      model_env: MODEL_EVALUATOR
+      max_tokens: 1024
+    price: {input_per_1k: 0.001, output_per_1k: 0.005}
+
+  harness-learning:
+    adapter: anthropic_sdk
+    billable: true             # 実課金。予算(budgets)の対象
+    params:
+      model_env: MODEL_LEARNING
+      max_tokens: 2048
+    price: {input_per_1k: 0.003, output_per_1k: 0.015}

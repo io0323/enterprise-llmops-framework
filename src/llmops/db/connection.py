@@ -52,7 +52,30 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # created_at は CURRENT_TIMESTAMP を既定にできない(ALTER の制約)。
     # 書き込み側が必ず明示的に入れるので既定なしで足す
     ("eval_results", "created_at", "TIMESTAMP"),
+    # Phase 3: 実課金とサブスク換算を分ける(NOTES.md N-045)
+    ("model_versions", "billable", "INTEGER NOT NULL DEFAULT 1"),
+    ("spans", "billable", "INTEGER NOT NULL DEFAULT 1"),
+    ("cost_daily", "billable", "INTEGER NOT NULL DEFAULT 1"),
 )
+
+#: 列を**足した直後だけ**流す補正SQL(既存行の初期値が実態と違う場合)。
+#: 列追加と同じ条件で1回だけ走るので冪等。
+BACKFILLS: dict[tuple[str, str], tuple[str, ...]] = {
+    # 既存行は既定の 1(実課金)で入る。過去の claude_cli / mock の行は
+    # サブスク換算・無課金なので 0 に直す。これをしないと、課金していない
+    # 過去のコストが予算を食ったままになる(N-045 の発端そのもの)
+    ("spans", "billable"): (
+        "UPDATE spans SET billable = 0 WHERE adapter IN ('claude_cli', 'mock')",
+    ),
+    ("model_versions", "billable"): (
+        "UPDATE model_versions SET billable = 0 WHERE adapter IN ('claude_cli', 'mock')",
+    ),
+    # cost_daily は adapter を持たないので、論理モデル名で突き合わせる
+    ("cost_daily", "billable"): (
+        "UPDATE cost_daily SET billable = 0 WHERE logical_model IN"
+        " (SELECT logical_name FROM model_versions WHERE adapter IN ('claude_cli', 'mock'))",
+    ),
+}
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -75,6 +98,8 @@ def apply_migrations(conn: sqlite3.Connection) -> list[str]:
         if column in _column_names(conn, table):
             continue
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        for statement in BACKFILLS.get((table, column), ()):
+            conn.execute(statement)
         applied.append(f"{table}.{column}")
     if applied:
         conn.commit()

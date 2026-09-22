@@ -12,3 +12,6 @@ jobs:
       # Phase 1 完了により continue-on-error を外した(docs/impl/phase0_bootstrap.md Step 0-4)
       - run: mypy src/llmops
       - run: pytest -q --cov --cov-report=term-missing
+      # policies.yaml が壊れていないことの検査。`policy check` の本体は実データが要るので
+      # 週次レポート(`llmops report weekly`)の中で回す
+      - run: llmops policy list

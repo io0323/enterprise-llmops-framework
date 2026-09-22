@@ -41,6 +41,7 @@ class PathsConfig(_Base):
     models_file: str = "models.yaml"
     evals_dir: str = "evals"
     report_dir: str = "output"
+    policies_file: str = "policies.yaml"
 
 
 class GatewayConfig(_Base):
@@ -92,6 +93,33 @@ class EvalConfig(_Base):
     mock_is_wiring_check: bool = True
 
 
+class AnomalyConfig(_Base):
+    """異常検知(NOTES.md N-046)。**止めるためではなく気付くための設定**。
+
+    ハード上限を置けないもの(サブスク利用のコスト)と、予算では捉えられないもの
+    (trace の生成数)を、普段との比で見る。既定は控えめ。誤検知で無視される
+    レポートになるほうが、検知しないことより害が大きいため。
+    """
+
+    #: 中央値を取る日数。0 で検知を止める
+    baseline_days: int = 7
+    #: 中央値の何倍で異常とみなすか
+    cost_multiple: float = 3.0
+    #: これ未満の日額は倍率にかかわらず無視する(USD/日)。静かな日の揺れを拾わない
+    min_cost_usd: float = 5.0
+    trace_multiple: float = 3.0
+    #: これ未満の日次 trace 数は無視する
+    min_traces: int = 20
+
+
+class RetentionConfig(_Base):
+    """保持期限(Step 3-5)。消すのは本文だけで、メタデータは残す。"""
+
+    span_text_days: int = 180
+    span_days: int = 730
+    archive_dir: str = "data/archive"
+
+
 class LoggingConfig(_Base):
     level: str = "INFO"
     file: str = "logs/llmops.log"
@@ -107,6 +135,8 @@ class Config(_Base):
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     root: Path = Field(default_factory=project_root)
@@ -139,6 +169,14 @@ class Config(_Base):
     @property
     def log_file(self) -> Path:
         return self.resolve(self.logging.file)
+
+    @property
+    def archive_dir(self) -> Path:
+        return self.resolve(self.retention.archive_dir)
+
+    @property
+    def policies_file(self) -> Path:
+        return self.resolve(self.paths.policies_file)
 
 
 def config_path(explicit: str | Path | None = None) -> Path:

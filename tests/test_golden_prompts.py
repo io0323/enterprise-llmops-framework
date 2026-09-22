@@ -103,6 +103,45 @@ def test_cgmp_section_variants_differ_only_by_context_rule(registry: PromptRegis
     assert with_context.replace(rule, "") == without
 
 
+@pytest.mark.parametrize("case", _cases("harness"), ids=_ids("harness"))
+def test_harness_prompt_renders_byte_identical(
+    case: dict[str, Any], registry: PromptRegistry
+) -> None:
+    """移行前の `render_prompt` / `render_eval_prompt` / `render_learning_prompt`
+    (Harness `app/agents/*.py`)の出力と1バイトも違わないこと。
+
+    ゴールデンは Harness の .venv で現行関数を直接呼んで採取した(NOTES.md N-044)。
+    """
+    _assert_byte_identical(case, registry)
+
+
+def test_harness_cases_cover_every_migrated_prompt() -> None:
+    """`docs/05_既存システム統合.md` §4: gen-v1 / eval-v1 / learning-v1 の3件 + 分岐。"""
+    cases = _cases("harness")
+    assert {case["prompt_id"] for case in cases} == {
+        "harness.generator",
+        "harness.evaluator",
+        "harness.learning",
+    }
+    # 改善指示の有無・過去投稿の有無の両方を押さえる
+    assert {case["name"] for case in cases} >= {
+        "harness_generator_with_hint",
+        "harness_evaluator_no_recent",
+    }
+
+
+def test_harness_prompts_are_published_and_use_harness_models(registry: PromptRegistry) -> None:
+    """本番で動いていた Prompt なので初回登録で published(N-018)。
+
+    論理モデルは Agent ごとに分ける。Harness は Agent ごとに実モデルと
+    max_tokens が違い(settings.model_* / learning だけ 2048)、それを踏襲するため。
+    """
+    for agent in ("generator", "evaluator", "learning"):
+        resolved = registry.resolve(f"harness.{agent}")
+        assert resolved.status == PUBLISHED
+        assert resolved.default_model == f"harness-{agent}"
+
+
 def test_dde_cases_exist() -> None:
     """ゴールデンが消えたまま「通った」ことにならないようにする。"""
     assert {case["prompt_id"] for case in _cases("dde")} == {

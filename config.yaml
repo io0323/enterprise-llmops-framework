@@ -7,6 +7,7 @@ paths:
   models_file: "models.yaml"
   evals_dir: "evals"
   report_dir: "output"
+  policies_file: "policies.yaml"
 
 gateway:
   retry_max: 2                    # 初回+再試行。既存実装(max_retry:1)と等価
@@ -25,9 +26,17 @@ guard:
     dde: 0
     # ELF 自身(評価実行)。1 run = 1 trace で、ケース数 × (生成 + Judge) ぶん呼ぶ
     elf: 0
+    # Harness。1パイプライン実行 = 1 trace で、候補数 × 最大3回再生成 × (生成 + 評価) を呼ぶ。
+    # 候補数は Harness の strategy.yaml が持つので ELF 側で二重に数えない。
+    # 有料APIの歯止めは回数ではなく金額: budgets の system=harness(NOTES.md N-044)
+    harness: 0
   hard_quota: true
 
 budget:
+  # **実課金の上限**(USD/月)。判定の対象は models.yaml で billable: true の
+  # 論理モデルだけ(現状は anthropic_sdk 系 = Harness)。`claude -p` 経由の
+  # コストはサブスク利用の換算値で、追加課金が無いため対象外(NOTES.md N-045)。
+  # サブスク換算ぶんも記録・レポートには載る(`llmops report cost`)
   global_monthly_usd: 20.0
   warn_percents: [50, 80, 100]
   # scope 別上限は `llmops budget set` で budgets テーブルへ登録する
@@ -47,6 +56,27 @@ eval:
   forbid_judge_fallback: true     # judge 論理モデルに fallback_to があれば実行を拒否する
   fail_on_degraded: true          # degraded=1 の span が混ざった run は無条件で fail
   mock_is_wiring_check: true      # mock を通った run は baseline にしない(配線確認扱い)
+
+# --- 保持期限(Phase 3)-----------------------------------------------------
+# 消すのは本文だけ。コスト・トークン・render_hash・Prompt版は残す
+# (消すと長期の傾向分析ができなくなる)
+anomaly:
+  # 使われ方の異常検知(NOTES.md N-046)。**警告するだけで、止めない。**
+  # サブスク利用(billable: false)のコストに金額のハード上限は置かない。
+  # 置くと「課金していない処理を金銭的理由なく止める」ことになり、N-045 で直した
+  # 逆転を作り直す。代わりに「直近の中央値に対する倍率」で普段との差を見る。
+  baseline_days: 7                # 中央値を取る日数。0 で検知を止める
+  cost_multiple: 3.0              # 中央値の何倍で異常とみなすか
+  min_cost_usd: 5.0               # これ未満の日額は倍率を見ない(USD/日)
+  trace_multiple: 3.0             # trace 生成数も同じ基準で見る。コストより早く出る
+  min_traces: 20                  # これ未満の日次 trace 数は無視する
+  # 下限(min_*)は誤検知よけ。静かな日の 0.01 → 1.00 USD を「100倍」と言わないため。
+  # **鳴りっぱなしで無視されるレポートは、鳴らないレポートより害が大きい**
+
+retention:
+  span_text_days: 180             # これを過ぎた span の入出力本文を消す
+  span_days: 730                  # span 行そのものを消す
+  archive_dir: "data/archive"     # 消す前に JSONL で書き出す先
 
 logging:
   level: INFO

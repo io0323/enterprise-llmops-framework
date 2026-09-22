@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -111,8 +112,8 @@ class Repository:
                 id, trace_id, parent_span_id, seq, task,
                 prompt_id, prompt_version, render_hash,
                 logical_model, model_version, adapter, resolved_target,
-                request_text, success, attempt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                request_text, success, attempt, billable, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 span.id,
@@ -129,6 +130,7 @@ class Repository:
                 span.resolved_target,
                 span.request_text,
                 span.attempt,
+                int(span.billable),
                 utcnow(),
             ),
         )
@@ -192,37 +194,52 @@ class Repository:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0.0,
+        billable: bool = True,
     ) -> None:
         """日次集計を加算する。`spans` からの導出だが、予算判定のたびに
-        フルスキャンさせないための集計表(設計 §2.4)。"""
+        フルスキャンさせないための集計表(設計 §2.4)。
+
+        `billable` は論理モデルの属性なので、同じ (day, system, logical_model) で
+        食い違うことはない。モデル定義を変えた場合は後から入る値で上書きする。
+        """
         self.conn.execute(
             """
             INSERT INTO cost_daily (day, system, logical_model, calls,
-                                    input_tokens, output_tokens, cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    input_tokens, output_tokens, cost_usd, billable)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(day, system, logical_model) DO UPDATE SET
                 calls = calls + excluded.calls,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
-                cost_usd = cost_usd + excluded.cost_usd
+                cost_usd = cost_usd + excluded.cost_usd,
+                billable = excluded.billable
             """,
-            (day, system, logical_model, calls, input_tokens, output_tokens, cost_usd),
+            (day, system, logical_model, calls, input_tokens, output_tokens, cost_usd,
+             int(billable)),
         )
         self.conn.commit()
 
-    def month_cost(self, month: str, system: str | None = None) -> float:
-        """当月の合計コスト。`month` は 'YYYY-MM'。"""
-        if system is None:
-            row = self.conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_daily WHERE day LIKE ?",
-                (f"{month}-%",),
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_daily"
-                " WHERE day LIKE ? AND system = ?",
-                (f"{month}-%", system),
-            ).fetchone()
+    def month_cost(
+        self, month: str, system: str | None = None, *, billable_only: bool = True
+    ) -> float:
+        """当月の合計コスト。`month` は 'YYYY-MM'。
+
+        既定は**実課金ぶんだけ**(予算判定が使う)。サブスク換算のコストを
+        混ぜると、課金していない処理が課金している処理を止める(NOTES.md N-045)。
+        レポートなど全体を見たい側は `billable_only=False` を渡す。
+        """
+        clauses = ["day LIKE ?"]
+        params: list[Any] = [f"{month}-%"]
+        if billable_only:
+            clauses.append("billable = 1")
+        if system is not None:
+            clauses.append("system = ?")
+            params.append(system)
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_daily"
+            f" WHERE {' AND '.join(clauses)}",
+            tuple(params),
+        ).fetchone()
         return float(row["total"])
 
     # ------------------------------------------------------------------
@@ -405,8 +422,8 @@ class Repository:
             """
             INSERT INTO model_versions (
                 logical_name, version, adapter, params_json, price_json,
-                fallback_to, status, config_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fallback_to, status, billable, config_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 model.logical_name,
@@ -416,6 +433,7 @@ class Repository:
                 model.price_json,
                 model.fallback_to,
                 model.status,
+                int(model.billable),
                 model.config_hash,
                 utcnow(),
             ),
@@ -779,3 +797,227 @@ class Repository:
             (trace_id,),
         ).fetchone()
         return float(row["cost"]), int(row["degraded"])
+
+    # ------------------------------------------------------------------
+    # Phase 3: 版別の実績(canary の比較に使う)
+    # ------------------------------------------------------------------
+    def prompt_version_stats(self, prompt_id: str, version: int, *, since: str) -> dict[str, Any]:
+        """ある Prompt 版の実績。canary と active を同じ物差しで比べるため。"""
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS calls,
+                   COALESCE(SUM(success), 0) AS succeeded,
+                   COALESCE(SUM(degraded), 0) AS degraded,
+                   COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(AVG(duration_ms), 0) AS avg_duration_ms
+              FROM spans
+             WHERE prompt_id = ? AND prompt_version = ? AND created_at >= ?
+            """,
+            (prompt_id, version, since),
+        ).fetchone()
+        calls = int(row["calls"])
+        return {
+            "calls": calls,
+            "succeeded": int(row["succeeded"]),
+            "degraded": int(row["degraded"]),
+            "cost_usd": float(row["cost_usd"]),
+            "output_tokens": int(row["output_tokens"]),
+            "avg_duration_ms": float(row["avg_duration_ms"]),
+            "success_rate": 0.0 if calls == 0 else int(row["succeeded"]) / calls * 100,
+            "cost_per_call": 0.0 if calls == 0 else float(row["cost_usd"]) / calls,
+        }
+
+    def daily_cost_by_system(
+        self, *, since_day: str, billable: bool | None = None
+    ) -> list[sqlite3.Row]:
+        """日 × system のコスト。`billable` を指定するとその種別だけ。"""
+        clauses = ["day >= ?"]
+        params: list[Any] = [since_day]
+        if billable is not None:
+            clauses.append("billable = ?")
+            params.append(int(billable))
+        return list(
+            self.conn.execute(
+                "SELECT day, system, SUM(cost_usd) AS cost_usd FROM cost_daily"
+                f" WHERE {' AND '.join(clauses)}"
+                " GROUP BY day, system ORDER BY day",
+                tuple(params),
+            ).fetchall()
+        )
+
+    def daily_trace_counts(self, *, since_day: str) -> list[sqlite3.Row]:
+        """日 × system の trace 生成数。コストより先に異常が出ることがある。"""
+        return list(
+            self.conn.execute(
+                "SELECT substr(started_at, 1, 10) AS day, system, COUNT(*) AS traces"
+                " FROM traces WHERE substr(started_at, 1, 10) >= ?"
+                " GROUP BY day, system ORDER BY day",
+                (since_day,),
+            ).fetchall()
+        )
+
+    def trace_costs(self, *, since: str, system: str | None = None) -> list[sqlite3.Row]:
+        """trace 単位のコスト(¥/解決タスク の素。19章 §13.2)。
+
+        span 単価が安くても、失敗リトライが多ければ trace 単価は高い。
+        そこを見ないと誤最適化する。
+        """
+        sql = """
+            SELECT t.id, t.system, t.operation, t.status,
+                   COUNT(s.id) AS calls,
+                   COALESCE(SUM(s.cost_usd), 0) AS cost_usd,
+                   COALESCE(SUM(1 - s.success), 0) AS failed_calls
+              FROM traces t LEFT JOIN spans s ON s.trace_id = t.id
+             WHERE t.started_at >= ?
+        """
+        params: tuple[str, ...] = (since,)
+        if system is not None:
+            sql += " AND t.system = ?"
+            params = (since, system)
+        sql += " GROUP BY t.id ORDER BY cost_usd DESC"
+        return list(self.conn.execute(sql, params).fetchall())
+
+    def eval_run_for_trace(self, trace_id: str) -> sqlite3.Row | None:
+        """この trace が評価実行のものかを**DBの状態から**判定する。
+
+        呼び出し側の申告ではなく、`eval_runs` に実体があるかで決める。
+        publish ゲートを迂回できる経路(未公開版の実行)を、
+        自己申告で開けさせないため(NOTES.md N-040)。
+        """
+        row = self.conn.execute(
+            "SELECT * FROM eval_runs WHERE trace_id = ? ORDER BY started_at DESC LIMIT 1",
+            (trace_id,),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    # ------------------------------------------------------------------
+    # Phase 3: 資産台帳
+    # ------------------------------------------------------------------
+    def upsert_asset(
+        self,
+        *,
+        asset_type: str,
+        asset_id: str,
+        owner: str,
+        purpose: str | None = None,
+        systems: str | None = None,
+        risk_level: str = "low",
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO asset_catalog
+                (asset_type, asset_id, owner, purpose, systems, risk_level, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_type, asset_id) DO UPDATE SET
+                owner = excluded.owner,
+                purpose = COALESCE(excluded.purpose, purpose),
+                systems = COALESCE(excluded.systems, systems),
+                risk_level = excluded.risk_level
+            """,
+            (asset_type, asset_id, owner, purpose, systems, risk_level, utcnow()),
+        )
+        self.conn.commit()
+
+    def get_asset(self, asset_type: str, asset_id: str) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM asset_catalog WHERE asset_type = ? AND asset_id = ?",
+            (asset_type, asset_id),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    def list_assets(self) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM asset_catalog ORDER BY asset_type, asset_id"
+            ).fetchall()
+        )
+
+    def touch_asset_usage(self, asset_type: str, asset_id: str, last_used_at: str) -> None:
+        self.conn.execute(
+            "UPDATE asset_catalog SET last_used_at = ? WHERE asset_type = ? AND asset_id = ?",
+            (last_used_at, asset_type, asset_id),
+        )
+        self.conn.commit()
+
+    def prompt_call_counts(self, *, since: str) -> dict[str, int]:
+        """直近の Prompt 別呼び出し回数(台帳の「使われているか」の指標)。"""
+        rows = self.conn.execute(
+            "SELECT prompt_id, COUNT(*) AS n FROM spans"
+            " WHERE prompt_id IS NOT NULL AND created_at >= ? GROUP BY prompt_id",
+            (since,),
+        ).fetchall()
+        return {str(row["prompt_id"]): int(row["n"]) for row in rows}
+
+    def model_call_counts(self, *, since: str) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT logical_model, COUNT(*) AS n FROM spans"
+            " WHERE created_at >= ? GROUP BY logical_model",
+            (since,),
+        ).fetchall()
+        return {str(row["logical_model"]): int(row["n"]) for row in rows}
+
+    def model_last_used(self) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT logical_model, MAX(created_at) AS last_used FROM spans GROUP BY logical_model"
+        ).fetchall()
+        return {str(row["logical_model"]): str(row["last_used"]) for row in rows}
+
+    # ------------------------------------------------------------------
+    # Phase 3: Policy 検査の材料
+    # ------------------------------------------------------------------
+    def spans_with_meta_flag(self, flag: str, *, since: str | None = None) -> list[sqlite3.Row]:
+        """span の meta_json に特定のフラグが立っている行を引く。
+
+        `unpublished_execution` の検出に使う(`llmops policy check`)。
+        """
+        sql = (
+            "SELECT s.*, t.system AS system FROM spans s JOIN traces t ON t.id = s.trace_id"
+            " WHERE s.meta_json LIKE ?"
+        )
+        params: list[Any] = [f'%"{flag}"%']
+        if since is not None:
+            sql += " AND s.created_at >= ?"
+            params.append(since)
+        sql += " ORDER BY s.created_at DESC"
+        return list(self.conn.execute(sql, params).fetchall())
+
+    def prompt_statuses(self) -> dict[tuple[str, int], str]:
+        """(prompt_id, version) → status。Policy 検査で版の状態を引くため。"""
+        rows = self.conn.execute(
+            "SELECT prompt_id, version, status FROM prompt_versions"
+        ).fetchall()
+        return {(str(r["prompt_id"]), int(r["version"])): str(r["status"]) for r in rows}
+
+    # ------------------------------------------------------------------
+    # Phase 3: 保持期限
+    # ------------------------------------------------------------------
+    def spans_older_than(self, cutoff: str, *, with_text_only: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM spans WHERE created_at < ?"
+        if with_text_only:
+            sql += " AND (request_text != '' OR response_text IS NOT NULL)"
+        sql += " ORDER BY created_at"
+        return list(self.conn.execute(sql, (cutoff,)).fetchall())
+
+    def strip_span_text(self, span_ids: Sequence[str]) -> int:
+        """本文だけを消す。**メタデータ(token / cost / hash / 版)は消さない。**"""
+        if not span_ids:
+            return 0
+        marks = ",".join("?" for _ in span_ids)
+        cursor = self.conn.execute(
+            f"UPDATE spans SET request_text = '', response_text = NULL,"  # noqa: S608
+            f" raw_response_json = NULL WHERE id IN ({marks})",
+            tuple(span_ids),
+        )
+        self.conn.commit()
+        return int(cursor.rowcount)
+
+    def delete_spans(self, span_ids: Sequence[str]) -> int:
+        if not span_ids:
+            return 0
+        marks = ",".join("?" for _ in span_ids)
+        cursor = self.conn.execute(
+            f"DELETE FROM spans WHERE id IN ({marks})", tuple(span_ids)  # noqa: S608
+        )
+        self.conn.commit()
+        return int(cursor.rowcount)

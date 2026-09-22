@@ -46,10 +46,12 @@ MODELS_YAML: dict[str, object] = {
             "fallback_to": "mock-echo",
         },
         "fail-no-fallback": {"adapter": "mock", "params": {"mode": "fail"}},
+        # 予算判定の検証用。mock だが「課金される」と宣言して予算の対象にする
         "priced": {
             "adapter": "mock",
             "params": {"mode": "echo"},
             "price": {"input_per_1k": 1.0, "output_per_1k": 2.0},
+            "billable": True,
         },
         "blocked-model": {"adapter": "mock", "params": {"mode": "echo"}, "status": "blocked"},
     }

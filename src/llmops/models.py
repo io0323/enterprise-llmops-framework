@@ -46,6 +46,8 @@ class SpanStart:
     model_version: int | None = None
     resolved_target: str | None = None
     attempt: int = 1
+    #: 実課金が発生する呼び出しか(予算判定の対象。NOTES.md N-045)
+    billable: bool = True
 
 
 @dataclass
@@ -108,6 +110,8 @@ class ModelVersionRow:
     price_json: str | None = None
     fallback_to: str | None = None
     status: str = "active"
+    #: 実課金が発生するモデルか(False はサブスク換算。予算判定の対象外)
+    billable: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +141,10 @@ class CompletionRequest:
     #: publish 前の候補版を評価できないと、評価ゲート自体が成立しないため。
     #: 緩めるのは状態チェックだけで、Guard / Trace / Cost は通常どおり通る
     allow_unpublished: bool = False
+    #: 呼び出し側が「送るつもりの本文」。指定するとレンダリング結果とバイト比較し、
+    #: 違えば LLM を呼ばずに `PromptMismatch`(NOTES.md N-044)。
+    #: 版管理を自前で持つシステムが、ELF の知らない版を黙って送らないための照合
+    expected_text: str | None = None
 
 
 @dataclass(frozen=True)

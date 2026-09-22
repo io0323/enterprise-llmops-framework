@@ -28,6 +28,16 @@ ACTIVE = "active"
 DEPRECATED = "deprecated"
 BLOCKED = "blocked"
 
+#: `billable` を書かなかったときに「課金されない」と見なす adapter(NOTES.md N-045)。
+#: 既定は **課金される**側に倒す。新しい Provider を足して宣言を忘れても、
+#: 予算の対象から外れて黙って上限を超える、という事故にはならない。
+NON_BILLABLE_ADAPTERS = ("claude_cli", "mock")
+
+
+def default_billable(adapter: str) -> bool:
+    """`billable` 未宣言のときの既定。"""
+    return adapter not in NON_BILLABLE_ADAPTERS
+
 
 def config_hash(entry: dict[str, Any]) -> str:
     """models.yaml の1エントリのハッシュ。キー順に依存しない形で取る。"""
@@ -46,6 +56,9 @@ class ResolvedModel:
     price: dict[str, float] = field(default_factory=dict)
     fallback_to: str | None = None
     status: str = ACTIVE
+    #: 実際に課金が発生するか。False は「サブスク利用の換算値」で、予算判定の対象外
+    #: (記録とレポートには従来どおり載る)。NOTES.md N-045
+    billable: bool = True
 
     @property
     def input_price_per_1k(self) -> float:
@@ -54,6 +67,13 @@ class ResolvedModel:
     @property
     def output_price_per_1k(self) -> float:
         return float(self.price.get("output_per_1k", 0.0))
+
+
+def _entry_billable(entry: dict[str, Any]) -> bool:
+    declared = entry.get("billable")
+    if declared is None:
+        return default_billable(str(entry.get("adapter", "")))
+    return bool(declared)
 
 
 @dataclass(frozen=True)
@@ -105,6 +125,7 @@ class ModelRegistry:
                     ),
                     status=str(entry.get("status", ACTIVE)),
                     config_hash=digest,
+                    billable=_entry_billable(entry),
                 )
             )
             self.repo.insert_audit_log(
@@ -140,6 +161,7 @@ class ModelRegistry:
             price=json.loads(row["price_json"]) if row["price_json"] else {},
             fallback_to=None if row["fallback_to"] is None else str(row["fallback_to"]),
             status=status,
+            billable=bool(row["billable"]),
         )
 
     def list_all(self) -> list[ResolvedModel]:
@@ -155,6 +177,7 @@ class ModelRegistry:
                     price=json.loads(row["price_json"]) if row["price_json"] else {},
                     fallback_to=None if row["fallback_to"] is None else str(row["fallback_to"]),
                     status=str(row["status"]),
+                    billable=bool(row["billable"]),
                 )
             )
         return models

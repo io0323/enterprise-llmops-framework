@@ -407,6 +407,209 @@ N-026 の直接原因は、`extract_json` が **Prompt 内の出力例 JSON** �
 
 `[project.scripts]` の入口を `llmops.cli:app` から `llmops.cli:run_cli` に変えた。
 
+### N-040 未公開版の実行は「呼び出し側の申告」では許さない
+N-038 で足した `CompletionRequest.allow_unpublished` は、published ゲートを
+迂回できる経路である。フラグを立てれば通るなら、ゲートは実質無い。
+
+`Gateway._authorize_unpublished` が許すのは次の2つだけ:
+
+1. `gateway.allow_unpublished: true`(開発時の設定。本番は false)
+2. **その trace が評価実行のものであること**。`eval_runs` に `trace_id` が
+   一致する行があり、かつ `prompt_id` が一致するかで判定する
+
+`allow_unpublished=True` が渡されても、2の裏付けが無ければ `PolicyViolation` にする。
+**「評価経路かどうか」を呼び出し側の申告ではなく DB の実体で決める。**
+実体を作るには `eval_runs` に行を入れる必要があり、それ自体が記録として残る。
+
+どちらの経路で通した場合も:
+- `audit_logs` に `policy.unpublished_execution`(どの run・どの prompt・どの版・理由)
+- span の `meta_json` に `unpublished_execution: <status>` の印
+
+`llmops policy check` の `no_unpublished_in_production` が、この印を数えて
+**評価実行の裏付けが無いものだけ**を違反として挙げる。
+
+### N-041 週次レポートを `governance` に置いた(`observability` ではない)
+集計対象がコスト(observability)・Policy(guard)・台帳と監査(governance)に跨る。
+`observability` に置くと `observability → guard → observability` の循環になり、
+依存の向きの絶対規約に反する(`tests/test_layering.py` が検出した)。
+週次レポートは「統制のための読み物」なので governance が置き場として正しい。
+
+### N-042 canary の振り分けを trace_id のハッシュにした
+乱数だと、1つの trace(=1記事の生成)の中で版が混ざりうる。混ざるとその出力が
+どちらの版のものか言えず、比較にならない。`sha256(trace_id) % 100 < percent` で
+**同じ trace は必ず同じ版**になるようにした。trace_id が無い場合(CLI の単発実行)
+だけ乱数に落ちる。
+
+### N-043 `policy check` の warn は「消す」のではなく「残す」
+移行で初回登録した版(`docs/05` の手順で published として登録したもの)には
+評価実行の裏付けが無い。`production-versions-need-evidence` がこれを warn で挙げる。
+
+形だけの評価スイートを作って warn を消すことはしない。**「裏付けが無い」は事実であり、
+消すべきなのは警告ではなく状態のほう**(Phase 2 の「偽の合格を作らない」と同じ考え方)。
+CI が見るのは `block` のみ(現在0件)。warn は週次レポートで棚卸しする。
+
+### N-044 Harness の統合(Step 3-6)
+`shopping-sns-auto-operation/backend` の LLM 呼び出しを ELF 経由にした。
+`cost_guard.py`・承認ゲート・`job_queue.py`・パイプラインの状態遷移には触れていない。
+
+**Prompt の正本をどちらに置くか。** Harness は Prompt を自前の DB(`prompt_versions`)で
+版管理しており、Learning Agent が改善版(gen-v2…)を提案し、人が API で activate する。
+これは Harness の HITL であり ELF が吸収するものではない(絶対ルール3)。一方で
+「DB で activate すれば ELF の評価ゲートを通らずに本番の文面が変わる」状態を残すと、
+Phase 2 の目的(評価を通さずに publish できない)が Harness だけ抜け落ちる。そこで:
+
+- v1 の3本を `prompts/harness/{generator,evaluator,learning}.md` に登録した
+  (`{x}` → `{{ x }}` の機械変換のみ。ゴールデン5件でバイト一致を確認済み。
+  ゴールデンは Harness の .venv で**移行前の**現行関数を直接呼んで採取した)
+- Harness は従来どおり DB の本文でレンダリングし、その本文を `expected_text` として
+  ELF に渡す。ELF は自分のレンダリング結果とバイト比較し、違えば **LLM を呼ぶ前に**
+  `PromptMismatch` にする(課金も span も発生しない)
+- 結果として、Learning の提案版を Harness で activate しただけでは生成が止まる。
+  **ELF に登録 → 評価 → publish してから activate する**、が新しい手順になる。
+  止まり方は「候補1件の生成失敗」(generation.py が捕捉して次へ進む)で、
+  エラーメッセージが登録手順を示す。黙って古い版で生成するより止まるほうを選んだ
+
+**呼び出し口の形。** Agent → `LlmClient.complete(job_id, agent, model, prompt, max_tokens)`
+の形は変えていない。既存テストの Fake がこのキーワード引数をそのまま受けるため。
+Prompt の ELF 上の身元(prompt_id / 変数)は `RegisteredPrompt`(`str` のサブクラス)に
+載せて運ぶ。文字列としては従来の本文そのものなので、書き出し API や Fake からは区別がつかない。
+
+- 改善指示ブロック(「# 改善指示 …」)の文言は Harness の Python に残し、変数
+  `improvement` で渡す。ELF のテンプレートは制御構文を持たないため(N-024 と同じ扱い)。
+  文言を ELF 側へ移すのは、評価スイートが揃ってから(移行の鉄則4)
+- `retry=False`。Harness は再試行していなかった。有料APIの呼び出し回数を増やさない
+- 応答本文は ELF の結果(strip_fence 済み)ではなく raw の text ブロックを連結して返す。
+  応答の解釈は従来どおり各 Agent の `strip_code_fence` に任せる
+- 挙動差1点: 応答が空のとき、ELF は `LLMError("LLM応答が空です")` を送出する
+  (従来は空文字が返り JSON 解析で失敗していた)。Learning ではステータスが
+  `invalid_llm_response` ではなくステップ失敗になる。実害が小さいので吸収していない
+
+**論理モデル。** Agent ごとに `harness-generator / -evaluator / -learning`。
+Harness は Agent ごとに実モデルと max_tokens(learning だけ 2048)が違うため。
+実モデル名は環境変数(`MODEL_GENERATOR` など。Harness の Settings と同名)から解決する。
+Harness の Settings は .env を環境変数に展開しないので、`LlmClient` が Settings の値を
+環境変数へ書き込んでから呼ぶ。API キーは Harness が作った SDK クライアントを
+`Gateway.use_adapter()` で渡す(ELF は API キーの在り処を知らない)。
+単価は Harness の標準単価表と同じ値を `models.yaml` に書いた。以前の
+「環境変数 ELF_PRICE_* で上書き」というコメントは**実装が無い記述**だったので消した。
+
+**ステップの記録。** docs/05 §4.2 の `tr.child(step)` は spans に行を作らない。
+spans は Guard の呼び出し回数とコスト集計の単位で、LLM 以外の行を混ぜると両方が狂うため。
+ステップ内の span の meta に `step` を付け、ステップ一覧(名前・所要時間・成否)は
+traces.meta_json の `steps` に残す。
+
+**スレッド。** Harness は API(BackgroundTasks)とスケジューラが別スレッドで LLM を呼ぶ。
+ELF の SQLite 接続は作ったスレッドでしか使えないので、Harness 側の ELF ハンドルは
+スレッドローカルにした(進行中 trace もスレッドごとになり、並行実行で混ざらない)。
+
+**Guard / 予算。** `calls_per_trace_limit_by_system.harness: 0`。候補数は Harness の
+strategy.yaml が持つので ELF で二重に数えない。有料APIの歯止めは回数ではなく金額で、
+`budgets` に `system=harness` 月20 USD(hard)を設定した(= Harness の月3000円 / 150円)。
+cost_guard(Harness の DB の LlmUsage を見る)と二重防御になる。LlmUsage の記録は従来どおり。
+
+**CI と導入。** ELF は別リポジトリで Harness の CI には入らない。
+- ELF 経由のテスト(6件)は `pytest.importorskip("llmops")` でスキップされる。
+  mypy は `llmops.*` を ignore_missing_imports にした。ELF に `py.typed` を足したので、
+  ELF を入れた環境では Harness の mypy が ELF の型で検査される
+- テストは ELF の記録先を一時DBに差し替える(autouse fixture)。本番の ELF DB を汚さない
+- 導入: `uv pip install --python .venv/bin/python -e <ELF のパス>`。
+  **`uv sync` は既定で余分なパッケージを消す**ので、実行後は入れ直すか `uv sync --inexact` を使う。
+  入っていなければ `LlmClient` は `ElfUnavailableError` で止まる(API を直接叩く経路は残していない)
+
+**確認。** 実 DB のコピー上で、偽の SDK クライアントを使って Harness の生成→評価を1サイクル
+流し、`report cost --by system` に cgmp / dde / elf / harness が並ぶことを確かめた。
+実 DB には流していない(課金を伴う実行と、偽の結果での汚染を避けるため)。
+実 DB に harness の行が載るのは、次にパイプラインが実際に走ったとき。
+
+### N-045 予算は「実課金ぶん」だけを見る(`billable`)
+Step 3-6 で Harness(唯一の実課金システム)が ELF 経由になった直後に、予算統制が
+**逆立ちしている**ことが分かった。
+
+- `claude -p`(CGMP/DDE)の `span.cost_usd` はサブスク利用の換算値で、追加請求は無い
+- それが `cost_daily` に積み上がり、`global_monthly_usd: 20.0` を食う
+- CGMP は実測で1記事あたり約 0.67 USD。月30記事で global に到達する
+- global は hard quota。その時点で、**実際に課金している Harness まで止まる**
+
+課金していない処理が、課金している処理を止める。金額の桁ではなく性質が違うものを
+同じ器で比べていたのが原因なので、性質を宣言できるようにした。
+
+**決めたこと。** `models.yaml` の論理モデルに `billable: true/false` を持たせ、
+`budgets` の判定対象を `billable: true` のコストだけにした。
+
+- 未宣言のときは adapter から決める(`claude_cli` / `mock` は false)。
+  ただし**既定は true(課金される側)**。新しい Provider を足して宣言を忘れても、
+  予算を素通りして黙って請求が伸びる、という向きには倒れない。
+  逆向きの失敗(課金しないものを課金扱いして止める)は、止まった時点で気付ける
+- リポジトリの `models.yaml` では全モデルに明示的に宣言した。宣言漏れはテストで落とす
+- `billable: false` のコストも **cost_daily / spans に従来どおり記録する**。
+  予算の対象から外すだけで、可視性は落とさない
+- `report cost` / 週次レポートに「うち実課金」列と「予算」列(対象 / 対象外 / 混在)を
+  足した。合計も実課金とサブスク換算に分けて出す。
+  `budget show` は、当月のサブスク換算ぶんを参考値として併記する
+- 呼び出し**回数**の上限(`calls_per_trace_limit`)は課金と無関係なので従来どおり全てに効く。
+  CGMP 絶対ルール3(1記事10回)はコストの話ではない
+
+**混ぜなかったもの。** サブスク換算コストにも上限を置きたくなるが、`budgets` には
+入れない。意味の違う数字を同じテーブルに入れると、どちらの上限に当たったのかが
+判らなくなる(今回の問題の再生産)。必要になった時点で別枠として設計する。
+
+**`global_monthly_usd` の意味が変わった。** 「ELF が記録した全コストの上限」から
+「**実課金の上限**」へ。値は 20.0 のまま据え置いた。実課金は現状 Harness だけで、
+Harness 側の月次上限(3000円 / 150円 = 20 USD)と一致しているため。
+
+**既存DBの移行。** `budgets` テーブルの行は変更不要(`global` / `harness` ともに
+意味が「実課金の上限」に変わるだけで、値は妥当)。直すのは過去のコスト行のほうで、
+これは列追加と同時に自動で当たる(`db/connection.py` の `BACKFILLS`)。
+
+1. `llmops` を新しい版にする
+2. 何らかの ELF コマンドを1回実行する(DB を開いた時点で移行が走る)。
+   `spans` / `cost_daily` / `model_versions` に `billable` 列が足され、
+   過去行のうち `claude_cli` / `mock` のものが 0 に直る
+3. `llmops sync` で `models.yaml` の宣言を DB に反映する(新 version が採番される)
+4. 確認: `llmops budget show` の使用済みが実課金ぶんだけになっていること、
+   `llmops report cost --by system` の「うち実課金」が Harness 以外 0 であること
+
+移行は列を足した瞬間だけ走るので冪等。既に列がある DB では何もしない。
+
+### N-046 サブスク利用にハード上限を付けず、異常検知にした
+N-045 で予算の対象を実課金ぶんに限定した結果、`claude_cli` 系(CGMP/DDE)には
+月次の歯止めが無くなった。`calls_per_trace_limit` は **trace 単位**なので、
+trace そのものが大量に作られるケース(スケジューラの二重起動、失敗ジョブの
+無限リトライ)は捉えられない。
+
+**ハード上限は付けない。** 理由は N-045 と同じ形の間違いになるため:
+
+- サブスク利用のコストは、止めても**お金は1円も減らない**。
+  止める行為に金銭的な根拠が無い
+- それでも止めれば、「課金していない処理が、金銭的な理由で止まる」。
+  N-045 で直した逆転を、global 予算の代わりに専用上限という形で作り直すだけ
+- しかも止まるのは本番の生成処理(CGMP の記事生成、DDE のラン)。
+  暴走していない通常実行まで、月末に近づくほど止まりやすくなる
+- 本当に困るのは「金額」ではなく「**意図しない使われ方**」。
+  それは上限値ではなく、普段との差でしか判定できない
+
+**代わりにしたこと。** 異常検知を週次レポートと `report cost` に入れた。
+
+- 判定は「直近 N 日の**中央値**に対する倍率」。平均ではなく中央値にしたのは、
+  1日の跳ね(まとめて記事を作った日)が基準を押し上げて、翌週の本当の異常を
+  隠してしまうため
+- **コストだけでなく trace 生成数も同じ基準で見る**。1回あたりが安い処理が
+  暴走した場合、コストが目立つ前に件数のほうが先に外れる
+- 見るのは予算の対象外(`billable: false`)のコストだけ。実課金ぶんは budgets が
+  止めるので、ここで二重に騒がない
+- 閾値は `config.yaml` の `anomaly:`(絶対ルール12)。既定は
+  中央値の3倍 / 日額5 USD以上 / 日次20 trace以上
+- **検出しても止めない。** 警告として出すだけで、止める判断は人がする
+
+**下限(`min_cost_usd` / `min_traces`)を併用した理由。** 倍率だけで見ると、
+静かな日の 0.01 USD → 1.00 USD が「100倍」として毎週出る。そうなったレポートは
+読まれなくなり、本物の異常も一緒に無視される。**鳴りっぱなしのレポートは、
+鳴らないレポートより害が大きい**(Phase 2 の「偽の合格を作らない」と同じ理由で、
+ここでは「偽の警告を作らない」)。既定を控えめにしてあるのはそのため。
+
+見落としのほうは許容している。この検知は最後の砦ではなく、週次で人が見る材料。
+本当に止めたいものがあれば、それはコードの不具合なので上限ではなく実装を直す。
+
 ## 未決事項
 
 - `spans` の保持期限。Phase 3 で決める。当面は無期限。

@@ -21,9 +21,16 @@ from llmops.errors import LLMOpsError
 from llmops.eval.closed_loop import add_case_from_span, add_manual_case
 from llmops.eval.gate import PublishGate
 from llmops.eval.regression import MODE_WIRING_CHECK, PASS, WIRING_CHECK
-from llmops.eval.report import eval_run_report, quality_report
+from llmops.eval.report import eval_run_report
+from llmops.eval.report import quality_report as eval_quality_report
 from llmops.eval.runner import EvalRunner
 from llmops.gateway import Runtime
+from llmops.governance import retention
+from llmops.governance.catalog import AssetCatalog
+from llmops.governance.deploy import Deployer
+from llmops.governance.weekly import weekly_report
+from llmops.guard.policy import check as policy_check_all
+from llmops.guard.policy import load_policies
 from llmops.logging_utils import get_logger, setup_logging
 from llmops.models import CompletionRequest
 from llmops.observability.report import cost_report, parse_since
@@ -49,12 +56,16 @@ trace_app = typer.Typer(name="trace", help="trace / span の参照", no_args_is_
 report_app = typer.Typer(name="report", help="Markdown レポート", no_args_is_help=True)
 budget_app = typer.Typer(name="budget", help="予算の確認・設定", no_args_is_help=True)
 eval_app = typer.Typer(name="eval", help="評価スイートの実行と回帰ゲート", no_args_is_help=True)
+catalog_app = typer.Typer(name="catalog", help="AI 資産台帳", no_args_is_help=True)
+policy_app = typer.Typer(name="policy", help="Policy の一覧と検査", no_args_is_help=True)
 app.add_typer(prompt_app)
 app.add_typer(model_app)
 app.add_typer(trace_app)
 app.add_typer(report_app)
 app.add_typer(budget_app)
 app.add_typer(eval_app)
+app.add_typer(catalog_app)
+app.add_typer(policy_app)
 
 CONFIG_OPTION = typer.Option(None, "--config", help="config.yaml のパス")
 
@@ -610,7 +621,10 @@ def report_cost(
     config = _load(config_path)
     repo = _open(config)
     try:
-        markdown = cost_report(repo, since=parse_since(since), by=by, system=system)
+        markdown = cost_report(
+            repo, since=parse_since(since), by=by, system=system,
+            anomaly_config=config.anomaly,
+        )
     finally:
         repo.close()
 
@@ -633,6 +647,8 @@ def budget_show(config_path: str | None = CONFIG_OPTION) -> None:
     try:
         states = runtime.guard.budget_states(config.system)
         rows = runtime.repo.list_budgets()
+        # 予算が見るのは実課金ぶんだけ。差分(サブスク換算)は参考として出す
+        subscription = runtime.cost.month_total(billable_only=False) - runtime.cost.month_total()
     finally:
         runtime.close()
 
@@ -650,6 +666,12 @@ def budget_show(config_path: str | None = CONFIG_OPTION) -> None:
         typer.echo(
             f"{state.budget_id:10} 使用済み {state.used_usd:.6f} / {state.limit_usd:.6f} USD "
             f"({state.percent:.1f}%)"
+        )
+    if subscription > 0:
+        typer.echo("")
+        typer.echo(
+            f"(参考)サブスク換算 {subscription:.6f} USD は予算の対象外です。"
+            "内訳は `llmops report cost --by system`"
         )
 
 
@@ -866,9 +888,263 @@ def report_quality(
     config = _load(config_path)
     repo = _open(config)
     try:
-        markdown = quality_report(repo, since=_sql_time(parse_since(since)))
+        markdown = eval_quality_report(repo, since=_sql_time(parse_since(since)))
     finally:
         repo.close()
+
+    if out is None:
+        typer.echo(markdown)
+        return
+    path = Path(out)
+    if not path.is_absolute():
+        path = config.report_dir / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    typer.echo(f"written: {path}")
+
+
+# ---------------------------------------------------------------------------
+# catalog(Phase 3 Step 3-3)
+# ---------------------------------------------------------------------------
+
+
+@catalog_app.command("list")
+def catalog_list(
+    no_owner: bool = typer.Option(False, "--no-owner", help="所有者未設定のものだけ"),
+    asset_type: str | None = typer.Option(None, "--type", help="prompt / model / eval_suite"),
+    since: str = typer.Option("30d", "--since", help="呼び出し回数の集計期間"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """AI 資産の一覧(所有者 / 用途 / リスク / 最終利用日 / 直近の呼び出し回数)。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        assets = AssetCatalog(runtime).collect(since=_sql_time(parse_since(since)))
+    finally:
+        runtime.close()
+
+    if asset_type is not None:
+        assets = [a for a in assets if a.asset_type == asset_type]
+    if no_owner:
+        assets = [a for a in assets if not a.has_owner]
+
+    if not assets:
+        typer.echo("該当する資産がありません")
+        return
+    for asset in assets:
+        owner = asset.owner or "(未設定)"
+        last = asset.last_used_at or "(未使用)"
+        purpose = f" 用途={asset.purpose}" if asset.purpose else ""
+        typer.echo(
+            f"{asset.asset_type:10} {asset.asset_id:28} owner={owner:10} "
+            f"risk={asset.risk_level:6} 直近={asset.recent_calls:4}回 最終利用={last}{purpose}"
+        )
+    missing = [a for a in assets if not a.has_owner]
+    if missing and not no_owner:
+        typer.echo(f"\n所有者未設定: {len(missing)} 件(`llmops catalog set-owner` で設定する)")
+
+
+@catalog_app.command("stale")
+def catalog_stale(
+    days: int = typer.Option(90, "--days", help="この日数以上使われていない資産"),
+    since: str = typer.Option("30d", "--since"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """使われていない資産を列挙する(棚卸し用)。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        assets = AssetCatalog(runtime).stale(
+            days=days, today=today, since=_sql_time(parse_since(since))
+        )
+    finally:
+        runtime.close()
+
+    if not assets:
+        typer.echo(f"{days}日以上使われていない資産はありません")
+        return
+    for asset in assets:
+        last = asset.last_used_at or "(未使用)"
+        typer.echo(f"{asset.asset_type:10} {asset.asset_id:28} 最終利用={last}")
+    typer.echo(f"\n{len(assets)} 件。使わないものは `llmops prompt deprecate` で落とす")
+
+
+@catalog_app.command("set-owner")
+def catalog_set_owner(
+    asset_type: str,
+    asset_id: str,
+    owner: str = typer.Option(..., "--owner"),
+    risk: str = typer.Option("low", "--risk", help="low / medium / high"),
+    purpose: str | None = typer.Option(None, "--purpose"),
+    systems: str | None = typer.Option(None, "--systems", help="利用システム(カンマ区切り)"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """資産に所有者・用途・リスクを設定する。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        asset = AssetCatalog(runtime).set_owner(
+            asset_type, asset_id, owner=owner, risk=risk, purpose=purpose, systems=systems
+        )
+    finally:
+        runtime.close()
+    typer.echo(f"{asset.asset_type}:{asset.asset_id} owner={asset.owner} risk={asset.risk_level}")
+
+
+@catalog_app.command("refresh")
+def catalog_refresh(config_path: str | None = CONFIG_OPTION) -> None:
+    """最終利用日を spans から台帳へ書き戻す。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        updated = AssetCatalog(runtime).refresh_usage()
+    finally:
+        runtime.close()
+    typer.echo(f"更新: {updated} 件")
+
+
+# ---------------------------------------------------------------------------
+# policy(Phase 3 Step 3-4)
+# ---------------------------------------------------------------------------
+
+
+@policy_app.command("check")
+def policy_check(
+    since: str = typer.Option("30d", "--since", help="検査対象の期間"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """全資産を policies.yaml に照らして違反を列挙する(CI 用)。
+
+    `action: block` の違反が1件でもあれば非ゼロ終了する。
+    """
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        policies = load_policies(config.policies_file)
+        if not policies:
+            typer.echo(f"policies.yaml がありません: {config.policies_file}")
+            return
+        assets = AssetCatalog(runtime).collect(since=_sql_time(parse_since(since)))
+        report = policy_check_all(
+            policies,
+            runtime.repo,
+            since=_sql_time(parse_since(since)),
+            models=runtime.models,
+            assets=assets,
+        )
+    finally:
+        runtime.close()
+
+    typer.echo(f"検査した Policy: {report.checked} 件")
+    if not report.violations:
+        typer.echo("違反なし")
+        return
+    for violation in report.violations:
+        mark = "BLOCK" if violation.blocking else "warn "
+        typer.echo(f"{mark} [{violation.policy_id}] {violation.subject}")
+        typer.echo(f"      {violation.detail}")
+    typer.echo(
+        f"\n違反 {len(report.violations)} 件(うち block {len(report.blocking)} 件)"
+    )
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@policy_app.command("list")
+def policy_list(config_path: str | None = CONFIG_OPTION) -> None:
+    """設定されている Policy の一覧。"""
+    config = _load(config_path)
+    policies = load_policies(config.policies_file)
+    if not policies:
+        typer.echo(f"policies.yaml がありません: {config.policies_file}")
+        return
+    for policy in policies:
+        typer.echo(f"[{policy.action:5}] {policy.id:36} rule={policy.rule}")
+        if policy.description:
+            typer.echo(f"          {policy.description.strip()}")
+
+
+# ---------------------------------------------------------------------------
+# retention(Phase 3 Step 3-5)
+# ---------------------------------------------------------------------------
+
+
+@app.command("retention")
+def retention_apply(
+    dry_run: bool = typer.Option(False, "--dry-run", help="何を消すかだけ表示する"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """保持期限を適用する。**消すのは本文だけ**でメタデータは残す。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        plan = retention.apply(repo, config, dry_run=dry_run)
+    finally:
+        repo.close()
+
+    typer.echo(f"本文を消す対象: {len(plan.strip_ids)} 件(< {plan.text_cutoff})")
+    typer.echo(f"行を消す対象:   {len(plan.delete_ids)} 件(< {plan.span_cutoff})")
+    if dry_run:
+        typer.echo("--dry-run のため何も変更していません")
+        return
+    if plan.archive_path:
+        typer.echo(f"アーカイブ: {plan.archive_path}")
+    typer.echo("メタデータ(cost / token / render_hash / Prompt版)は残しています")
+
+
+# ---------------------------------------------------------------------------
+# 段階展開(Phase 3 Step 3-1)
+# ---------------------------------------------------------------------------
+
+
+@prompt_app.command("promote")
+def prompt_promote(
+    prompt_id: str,
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """canary を active に昇格する(**人間が叩く操作**。自動昇格はしない)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        state = Deployer(repo, _registry(config, repo)).promote(prompt_id, actor=config.system)
+    finally:
+        repo.close()
+    typer.echo(f"active → {prompt_id}@{state.active_version}(canary は解除しました)")
+
+
+@prompt_app.command("canary-stop")
+def prompt_canary_stop(
+    prompt_id: str,
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """canary を止めて active のみに戻す(昇格も rollback もしない)。"""
+    config = _load(config_path)
+    repo = _open(config)
+    try:
+        state = Deployer(repo, _registry(config, repo)).stop_canary(
+            prompt_id, actor=config.system
+        )
+    finally:
+        repo.close()
+    typer.echo(f"canary を停止しました。active={prompt_id}@{state.active_version}")
+
+
+@report_app.command("weekly")
+def report_weekly(
+    since: str = typer.Option("7d", "--since"),
+    stale_days: int = typer.Option(90, "--stale-days"),
+    out: str | None = typer.Option(None, "--out", help="Markdown の出力先"),
+    config_path: str | None = CONFIG_OPTION,
+) -> None:
+    """週次レポート(コスト・評価・Policy・台帳・要注意イベントを1枚に)。"""
+    config = _load(config_path)
+    runtime = Runtime.build(config)
+    try:
+        markdown = weekly_report(runtime, since=_sql_time(parse_since(since)),
+                                 stale_days=stale_days)
+    finally:
+        runtime.close()
 
     if out is None:
         typer.echo(markdown)

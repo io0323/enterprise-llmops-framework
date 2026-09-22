@@ -1,0 +1,54 @@
+# 宣言的 Policy(Phase 3 Step 3-4)。`llmops policy check` が実データに照らす。
+# **文書だけの Policy にしない**(19章 §11)ための実体。
+#
+# action: block(既定)= policy check が非ゼロ終了する / warn = 列挙のみ
+policies:
+  - id: no-unpublished-in-production
+    rule: no_unpublished_in_production
+    action: block
+    description: >-
+      published でない版が実行された形跡を検出する。評価実行(eval_runs に裏付けの
+      あるもの)は正規の経路なので除く。裏付けの無い実行は publish ゲートの迂回。
+
+  - id: no-raw-completion
+    rule: no_raw_completion
+    action: block
+    description: >-
+      Registry 管理外の呼び出し(complete_raw)。移行期間のみ許した経路で、
+      Prompt 外部化が終わった今は使われないはず。span に版が刻まれないため検出したい。
+
+  - id: no-model-fallback
+    rule: no_model_fallback
+    action: block
+    description: >-
+      本番の論理モデルに fallback_to が復活していないか(NOTES.md N-026 の再発検知)。
+      落とし先が mock だと「それらしい偽の結果」が通り、評価スコアまで捏造される。
+    # Fallback 機構そのもののテストに使う論理モデルは除外する
+    allow:
+      - always-fail
+
+  - id: high-risk-requires-owner
+    rule: owner_required
+    action: block
+    risk: high
+    description: リスク high の資産には所有者が必須。
+
+  - id: every-asset-should-have-an-owner
+    rule: owner_required
+    action: warn
+    description: >-
+      全資産に所有者を付ける(Phase 3 完了条件)。作業を止めないよう warn にしてあるが、
+      `llmops catalog list --no-owner` が0件になるまで放置しない。
+
+  - id: forced-publish-is-exceptional
+    rule: no_forced_publish
+    action: warn
+    description: >-
+      評価ゲートを飛ばした publish(--force)。緊急時には使うが、常態化していないかを見る。
+
+  - id: production-versions-need-evidence
+    rule: eval_before_publish
+    action: warn
+    description: >-
+      いま本番になっている版に評価実行の裏付けがあるか。ゲートは publish の瞬間に
+      効くが、--force や移行時の初回登録では通っていない。
