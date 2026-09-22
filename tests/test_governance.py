@@ -598,14 +598,15 @@ def test_retention_keeps_recent_spans(
 # ---------------------------------------------------------------------------
 
 
-def test_weekly_report_covers_the_three_things(runtime: Runtime, config: Config) -> None:
+def test_weekly_report_covers_the_four_things(runtime: Runtime, config: Config) -> None:
     runtime.prompts.sync()
     runtime.models.sync()
     markdown = weekly_report(runtime, since=SINCE)
-    assert "必ず見る3つ" in markdown
+    assert "必ず見る4つ" in markdown
     assert "degraded 件数" in markdown
     assert "失敗に使ったコスト" in markdown
     assert "未使用の資産" in markdown
+    assert "使われ方の異常" in markdown  # N-046(ハード上限を置けないぶんの見張り)
     assert "閉ループ" in markdown
 
 

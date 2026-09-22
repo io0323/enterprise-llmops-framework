@@ -828,6 +828,35 @@ class Repository:
             "cost_per_call": 0.0 if calls == 0 else float(row["cost_usd"]) / calls,
         }
 
+    def daily_cost_by_system(
+        self, *, since_day: str, billable: bool | None = None
+    ) -> list[sqlite3.Row]:
+        """日 × system のコスト。`billable` を指定するとその種別だけ。"""
+        clauses = ["day >= ?"]
+        params: list[Any] = [since_day]
+        if billable is not None:
+            clauses.append("billable = ?")
+            params.append(int(billable))
+        return list(
+            self.conn.execute(
+                "SELECT day, system, SUM(cost_usd) AS cost_usd FROM cost_daily"
+                f" WHERE {' AND '.join(clauses)}"
+                " GROUP BY day, system ORDER BY day",
+                tuple(params),
+            ).fetchall()
+        )
+
+    def daily_trace_counts(self, *, since_day: str) -> list[sqlite3.Row]:
+        """日 × system の trace 生成数。コストより先に異常が出ることがある。"""
+        return list(
+            self.conn.execute(
+                "SELECT substr(started_at, 1, 10) AS day, system, COUNT(*) AS traces"
+                " FROM traces WHERE substr(started_at, 1, 10) >= ?"
+                " GROUP BY day, system ORDER BY day",
+                (since_day,),
+            ).fetchall()
+        )
+
     def trace_costs(self, *, since: str, system: str | None = None) -> list[sqlite3.Row]:
         """trace 単位のコスト(¥/解決タスク の素。19章 §13.2)。
 

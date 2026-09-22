@@ -16,6 +16,7 @@ from typing import Any
 from llmops.governance.audit import attention_counts
 from llmops.governance.catalog import AssetCatalog
 from llmops.guard import policy as policy_module
+from llmops.observability.anomaly import anomaly_lines, find_anomalies
 from llmops.observability.report import collect
 
 
@@ -28,7 +29,7 @@ def weekly_report(
 ) -> str:
     """週次レポート(Step 3-7)。1枚で週の状態が分かることを優先する。
 
-    「必ず見る3つ」(運用ガイド §2)を上に置き、詳細は下に流す。
+    「必ず見る4つ」(運用ガイド §2)を上に置き、詳細は下に流す。
     """
     repo = runtime.repo
     stamp = today or datetime.now(UTC).strftime("%Y-%m-%d")
@@ -50,13 +51,17 @@ def weekly_report(
         policies, repo, since=since, models=runtime.models, assets=assets
     )
     attention = attention_counts(repo, since=since)
+    # サブスク換算ぶんには上限を置かない。普段との比で見て、止めずに知らせる(N-046)
+    anomalies = find_anomalies(
+        repo, runtime.config.anomaly, since_day=since[:10], today=stamp
+    )
 
     lines = [
         f"# ELF 週次レポート — {stamp}",
         "",
         f"対象期間: {since} 以降",
         "",
-        "## 必ず見る3つ",
+        "## 必ず見る4つ",
         "",
         "| 見るもの | 値 | 判断 |",
         "|---|---:|---|",
@@ -78,6 +83,13 @@ def weekly_report(
         + " |",
         f"| {stale_days}日未使用の資産 | {len(stale)} | "
         + ("棚卸しの対象(`llmops catalog stale`)" if stale else "なし")
+        + " |",
+        f"| 使われ方の異常 | {len(anomalies)} | "
+        + (
+            "**普段と桁が違う system がある。下の「使われ方の異常」を見る**"
+            if anomalies
+            else "普段どおり"
+        )
         + " |",
         "",
         "## コスト",
@@ -107,6 +119,8 @@ def weekly_report(
             f" {b.billable_cost_usd:.6f} | {b.budget_scope} | {b.failed_cost_usd:.6f} |"
             for b in buckets
         ]
+
+    lines += ["", "## 使われ方の異常(予算の対象外ぶん)", ""] + anomaly_lines(anomalies)
 
     lines += ["", "## 評価", ""]
     runs = [r for r in repo.list_eval_runs(limit=50) if str(r["started_at"] or "") >= since]

@@ -1,8 +1,9 @@
 """Markdown レポート生成(FR-033)。
 
 Web UI は作らない(要件定義 §7 非対象)。CLI と Markdown で代替する。
-`docs/04_運用ガイド.md` の週次ルーチンが「必ず見る3つ」として挙げているのは
-degraded 件数・失敗spanのコスト・stale資産なので、それが1枚で見えることを優先する。
+`docs/04_運用ガイド.md` の週次ルーチンが「必ず見る4つ」として挙げているのは
+degraded 件数・失敗spanのコスト・stale資産・使われ方の異常なので、
+それが1枚で見えることを優先する。
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from llmops.config import AnomalyConfig
 from llmops.db.repository import Repository
+from llmops.observability.anomaly import anomaly_lines, find_anomalies
 
 _SINCE_RE = re.compile(r"^(\d+)([dhw])$")
 
@@ -134,6 +137,7 @@ def cost_report(
     by: str = "system",
     system: str | None = None,
     now: datetime | None = None,
+    anomaly_config: AnomalyConfig | None = None,
 ) -> str:
     """コストレポート(Markdown)。"""
     buckets = collect(repo, since=since, by=by, system=system)
@@ -147,9 +151,25 @@ def cost_report(
         f"- 生成: {generated}",
         "",
     ]
+    def with_anomalies(body: list[str]) -> str:
+        """異常検知の節は、呼び出しが無い期間でも必ず出す。
+
+        「記録が無い」ことと「見ていない」ことを混ぜない。cost_daily に記録が
+        あるのに spans が無い、という食い違い自体が異常の手がかりになる。
+        """
+        if anomaly_config is None:
+            return "\n".join(body) + "\n"
+        # サブスク換算のコストには上限を置かない。代わりに普段との比で見る(N-046)
+        found = find_anomalies(
+            repo, anomaly_config, since_day=_sql_time(since)[:10], today=generated[:10]
+        )
+        return "\n".join(
+            body + ["", "## 使われ方の異常(予算の対象外ぶん)", ""] + anomaly_lines(found)
+        ) + "\n"
+
     if not buckets:
         lines.append("対象期間に記録された呼び出しはありません。")
-        return "\n".join(lines) + "\n"
+        return with_anomalies(lines)
 
     lines += [
         "| " + by + " | 呼び出し | 成功率 | degraded | 入力tok | 出力tok | cost(USD) | "
@@ -183,9 +203,11 @@ def cost_report(
         + (f"(全体の {failed_cost / total_cost * 100:.1f}%)" if total_cost > 0 else ""),
         f"- degraded(Fallback で得た結果): {degraded} 件",
     ]
+
     if degraded:
         lines.append(
             "  - **0 より大きい場合は Fallback が発生している。"
             "`llmops model health` で疎通を確認すること**(運用ガイド §2)"
         )
-    return "\n".join(lines) + "\n"
+
+    return with_anomalies(lines)

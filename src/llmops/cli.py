@@ -621,7 +621,10 @@ def report_cost(
     config = _load(config_path)
     repo = _open(config)
     try:
-        markdown = cost_report(repo, since=parse_since(since), by=by, system=system)
+        markdown = cost_report(
+            repo, since=parse_since(since), by=by, system=system,
+            anomaly_config=config.anomaly,
+        )
     finally:
         repo.close()
 
