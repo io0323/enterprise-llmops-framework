@@ -80,8 +80,13 @@ class CostTracker:
         input_tokens: int | None,
         output_tokens: int | None,
         day: str | None = None,
+        billable: bool = True,
     ) -> None:
-        """日次集計に加算する。失敗しても本処理は止めない(観測と同じ扱い)。"""
+        """日次集計に加算する。失敗しても本処理は止めない(観測と同じ扱い)。
+
+        `billable=False`(サブスク換算)も**記録はする**。可視性を落とさず、
+        予算判定の対象からだけ外す(NOTES.md N-045)。
+        """
         try:
             self.repo.upsert_cost_daily(
                 day=day or today(),
@@ -90,9 +95,19 @@ class CostTracker:
                 input_tokens=input_tokens or 0,
                 output_tokens=output_tokens or 0,
                 cost_usd=cost_usd,
+                billable=billable,
             )
         except Exception as exc:  # noqa: BLE001 - 集計失敗で呼び出し結果を捨てない
             logger.warning("cost_daily の更新に失敗しました(処理は継続します): %s", exc)
 
-    def month_total(self, *, system: str | None = None, month: str | None = None) -> float:
-        return self.repo.month_cost(month or this_month(), system=system)
+    def month_total(
+        self,
+        *,
+        system: str | None = None,
+        month: str | None = None,
+        billable_only: bool = True,
+    ) -> float:
+        """当月コスト。既定は実課金ぶんだけ(予算が見るのはこちら)。"""
+        return self.repo.month_cost(
+            month or this_month(), system=system, billable_only=billable_only
+        )

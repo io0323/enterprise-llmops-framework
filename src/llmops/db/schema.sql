@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS spans (
     -- 実行結果
     success           INTEGER NOT NULL,
     degraded          INTEGER NOT NULL DEFAULT 0,  -- Fallbackで得た結果か
+    billable          INTEGER NOT NULL DEFAULT 1,  -- 1=実課金, 0=サブスク換算(予算の対象外)
     attempt           INTEGER NOT NULL DEFAULT 1,
     error_type        TEXT,
     error_message     TEXT,
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS model_versions (
     price_json     TEXT,                     -- {"input_per_1k":0.0,"output_per_1k":0.0}
     fallback_to    TEXT,                     -- 別の論理モデル名
     status         TEXT NOT NULL DEFAULT 'active', -- active/deprecated/blocked
+    billable       INTEGER NOT NULL DEFAULT 1,  -- 1=実課金, 0=サブスク換算(予算の対象外)
     config_hash    TEXT NOT NULL,            -- models.yaml該当エントリのハッシュ
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (logical_name, version)
@@ -134,6 +136,8 @@ CREATE TABLE IF NOT EXISTS cost_daily (
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd   REAL NOT NULL DEFAULT 0,
+    -- 予算(budgets)が見るのは billable = 1 の行だけ。0 はサブスク換算で追加課金が無い
+    billable   INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (day, system, logical_model)
 );
 

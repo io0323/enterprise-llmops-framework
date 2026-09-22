@@ -46,6 +46,8 @@ class SpanStart:
     model_version: int | None = None
     resolved_target: str | None = None
     attempt: int = 1
+    #: 実課金が発生する呼び出しか(予算判定の対象。NOTES.md N-045)
+    billable: bool = True
 
 
 @dataclass
@@ -108,6 +110,8 @@ class ModelVersionRow:
     price_json: str | None = None
     fallback_to: str | None = None
     status: str = "active"
+    #: 実課金が発生するモデルか(False はサブスク換算。予算判定の対象外)
+    billable: bool = True
 
 
 # ---------------------------------------------------------------------------

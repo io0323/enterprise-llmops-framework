@@ -644,6 +644,8 @@ def budget_show(config_path: str | None = CONFIG_OPTION) -> None:
     try:
         states = runtime.guard.budget_states(config.system)
         rows = runtime.repo.list_budgets()
+        # 予算が見るのは実課金ぶんだけ。差分(サブスク換算)は参考として出す
+        subscription = runtime.cost.month_total(billable_only=False) - runtime.cost.month_total()
     finally:
         runtime.close()
 
@@ -661,6 +663,12 @@ def budget_show(config_path: str | None = CONFIG_OPTION) -> None:
         typer.echo(
             f"{state.budget_id:10} 使用済み {state.used_usd:.6f} / {state.limit_usd:.6f} USD "
             f"({state.percent:.1f}%)"
+        )
+    if subscription > 0:
+        typer.echo("")
+        typer.echo(
+            f"(参考)サブスク換算 {subscription:.6f} USD は予算の対象外です。"
+            "内訳は `llmops report cost --by system`"
         )
 
 

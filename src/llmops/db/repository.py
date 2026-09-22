@@ -112,8 +112,8 @@ class Repository:
                 id, trace_id, parent_span_id, seq, task,
                 prompt_id, prompt_version, render_hash,
                 logical_model, model_version, adapter, resolved_target,
-                request_text, success, attempt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                request_text, success, attempt, billable, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 span.id,
@@ -130,6 +130,7 @@ class Repository:
                 span.resolved_target,
                 span.request_text,
                 span.attempt,
+                int(span.billable),
                 utcnow(),
             ),
         )
@@ -193,37 +194,52 @@ class Repository:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0.0,
+        billable: bool = True,
     ) -> None:
         """日次集計を加算する。`spans` からの導出だが、予算判定のたびに
-        フルスキャンさせないための集計表(設計 §2.4)。"""
+        フルスキャンさせないための集計表(設計 §2.4)。
+
+        `billable` は論理モデルの属性なので、同じ (day, system, logical_model) で
+        食い違うことはない。モデル定義を変えた場合は後から入る値で上書きする。
+        """
         self.conn.execute(
             """
             INSERT INTO cost_daily (day, system, logical_model, calls,
-                                    input_tokens, output_tokens, cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    input_tokens, output_tokens, cost_usd, billable)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(day, system, logical_model) DO UPDATE SET
                 calls = calls + excluded.calls,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
-                cost_usd = cost_usd + excluded.cost_usd
+                cost_usd = cost_usd + excluded.cost_usd,
+                billable = excluded.billable
             """,
-            (day, system, logical_model, calls, input_tokens, output_tokens, cost_usd),
+            (day, system, logical_model, calls, input_tokens, output_tokens, cost_usd,
+             int(billable)),
         )
         self.conn.commit()
 
-    def month_cost(self, month: str, system: str | None = None) -> float:
-        """当月の合計コスト。`month` は 'YYYY-MM'。"""
-        if system is None:
-            row = self.conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_daily WHERE day LIKE ?",
-                (f"{month}-%",),
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_daily"
-                " WHERE day LIKE ? AND system = ?",
-                (f"{month}-%", system),
-            ).fetchone()
+    def month_cost(
+        self, month: str, system: str | None = None, *, billable_only: bool = True
+    ) -> float:
+        """当月の合計コスト。`month` は 'YYYY-MM'。
+
+        既定は**実課金ぶんだけ**(予算判定が使う)。サブスク換算のコストを
+        混ぜると、課金していない処理が課金している処理を止める(NOTES.md N-045)。
+        レポートなど全体を見たい側は `billable_only=False` を渡す。
+        """
+        clauses = ["day LIKE ?"]
+        params: list[Any] = [f"{month}-%"]
+        if billable_only:
+            clauses.append("billable = 1")
+        if system is not None:
+            clauses.append("system = ?")
+            params.append(system)
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_daily"
+            f" WHERE {' AND '.join(clauses)}",
+            tuple(params),
+        ).fetchone()
         return float(row["total"])
 
     # ------------------------------------------------------------------
@@ -406,8 +422,8 @@ class Repository:
             """
             INSERT INTO model_versions (
                 logical_name, version, adapter, params_json, price_json,
-                fallback_to, status, config_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fallback_to, status, billable, config_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 model.logical_name,
@@ -417,6 +433,7 @@ class Repository:
                 model.price_json,
                 model.fallback_to,
                 model.status,
+                int(model.billable),
                 model.config_hash,
                 utcnow(),
             ),

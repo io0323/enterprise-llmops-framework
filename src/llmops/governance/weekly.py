@@ -36,6 +36,7 @@ def weekly_report(
 
     total_calls = sum(b.calls for b in buckets)
     total_cost = sum(b.cost_usd for b in buckets)
+    billable_cost = sum(b.billable_cost_usd for b in buckets)
     failed_cost = sum(b.failed_cost_usd for b in buckets)
     degraded = sum(b.degraded for b in buckets)
 
@@ -82,6 +83,8 @@ def weekly_report(
         "## コスト",
         "",
         f"- 呼び出し: {total_calls} 件 / コスト: {total_cost:.6f} USD",
+        f"- **実課金(予算の対象): {billable_cost:.6f} USD** / "
+        f"サブスク換算: {total_cost - billable_cost:.6f} USD",
     ]
 
     trace_rows = repo.trace_costs(since=_as_datetime(since))
@@ -96,12 +99,12 @@ def weekly_report(
     if buckets:
         lines += [
             "",
-            "| system | 呼び出し | 成功率 | cost(USD) | 失敗cost |",
-            "|---|---:|---:|---:|---:|",
+            "| system | 呼び出し | 成功率 | cost(USD) | うち実課金 | 予算 | 失敗cost |",
+            "|---|---:|---:|---:|---:|---|---:|",
         ]
         lines += [
             f"| {b.key} | {b.calls} | {b.success_rate:.1f}% | {b.cost_usd:.6f} |"
-            f" {b.failed_cost_usd:.6f} |"
+            f" {b.billable_cost_usd:.6f} | {b.budget_scope} | {b.failed_cost_usd:.6f} |"
             for b in buckets
         ]
 

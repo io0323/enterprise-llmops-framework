@@ -1,8 +1,15 @@
 # 論理モデル定義。実モデル名・Provider製品名をここに書かない(CLAUDE.md 絶対ルール13)。
+#
+# billable: 実際に課金が発生するか。予算(budgets)が見るのは true のものだけ。
+#   claude_cli は subscription 利用で、span に載るコストは `total_cost_usd` の換算値。
+#   追加請求が無いので false。混ぜると「課金していない処理が課金している処理を
+#   止める」状態になる(NOTES.md N-045)。false でも記録とレポートには載る。
+#   未宣言のときは adapter から決まり、既定は **true(課金される)側**。
 # 内容を変更すると config_hash が変わり、llmops sync が自動で新 version を採番する。
 models:
   chat-standard:
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 600
@@ -14,6 +21,7 @@ models:
 
   chat-fast:
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 180
@@ -23,6 +31,7 @@ models:
     # DDE の 50件バッチ分類用。移行時に挙動を変えないため、
     # 既存 demand-discovery-engine/config.yaml の timeout_sec: 300 をそのまま踏襲する。
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 300
@@ -32,6 +41,7 @@ models:
   judge:
     # 評価用。本番生成と分離しておく(自己評価バイアスの回避 / 将来の差し替え余地)
     adapter: claude_cli
+    billable: false            # claude -p はサブスク利用。追加課金は無い(N-045)
     params:
       command: ["claude", "-p", "--output-format", "json"]
       timeout_sec: 300
@@ -42,11 +52,13 @@ models:
     # mock(echo)はプロンプトをそのまま返すため、JSON例を含むプロンプトだと
     # 「それらしい結果」が通ってしまう(NOTES.md N-026 で実際に起きた)
     adapter: mock
+    billable: false            # mock。課金しない
     params: {mode: echo}
 
   mock-echo:
     # 動作確認・テスト専用
     adapter: mock
+    billable: false            # mock。課金しない
     params: {mode: echo}
 
   # --- Harness(shopping-sns-auto-operation)--------------------------------
@@ -63,6 +75,7 @@ models:
   # - fallback_to は設定しない(N-026)。有料APIの代替先を黙って切り替えない
   harness-generator:
     adapter: anthropic_sdk
+    billable: true             # 実課金。予算(budgets)の対象
     params:
       model_env: MODEL_GENERATOR
       max_tokens: 1024
@@ -70,6 +83,7 @@ models:
 
   harness-evaluator:
     adapter: anthropic_sdk
+    billable: true             # 実課金。予算(budgets)の対象
     params:
       model_env: MODEL_EVALUATOR
       max_tokens: 1024
@@ -77,6 +91,7 @@ models:
 
   harness-learning:
     adapter: anthropic_sdk
+    billable: true             # 実課金。予算(budgets)の対象
     params:
       model_env: MODEL_LEARNING
       max_tokens: 2048

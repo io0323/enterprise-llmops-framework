@@ -6,6 +6,10 @@
 1. trace 単位の呼び出し回数上限(CGMP 絶対ルール3 を ELF 側で強制)→ `LLMBudgetExceeded`
 2. 月次予算(`budgets` と `cost_daily` の当月合計)→ `QuotaExceeded`
 
+予算が見るのは **実課金ぶん(`billable = 1`)だけ**。`claude -p` 経由のコストは
+サブスク利用の換算値で追加課金が無いため、対象から外す。混ぜると「課金していない
+処理が、課金している処理を止める」状態になる(NOTES.md N-045)。
+
 `hard_quota: false` のときは WARN ログのみで通す(記録はする)。
 """
 
@@ -57,10 +61,18 @@ class Guard:
         logical_model: str,
         estimated_cost: float,
         needed_calls: int = 1,
+        billable: bool = True,
     ) -> None:
-        """拒否すべきなら例外を送出する。Adapter を呼ぶ前に必ず通す。"""
+        """拒否すべきなら例外を送出する。Adapter を呼ぶ前に必ず通す。
+
+        `billable=False`(サブスク利用で追加課金が無い呼び出し)は予算判定をしない。
+        課金していない処理が、課金している処理の予算を食う状態にしないため
+        (NOTES.md N-045)。呼び出し回数の上限は課金と無関係なので従来どおり効く。
+        """
         if trace_id is not None:
             self._check_calls(system=system, trace_id=trace_id, needed=needed_calls)
+        if not billable:
+            return
         self._check_budget(
             system=system, logical_model=logical_model, estimated_cost=estimated_cost
         )

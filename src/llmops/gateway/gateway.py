@@ -94,6 +94,7 @@ class Gateway:
             logical_model=model.logical_name,
             estimated_cost=self.cost.estimate(model, text) * attempts,
             needed_calls=attempts,
+            billable=model.billable,
         )
 
         last_error: Exception | None = None
@@ -236,6 +237,7 @@ class Gateway:
             model_version=model.version,
             parent_span_id=req.parent_span_id,
             attempt=attempt,
+            billable=model.billable,
         )
 
         started = time.monotonic()
@@ -288,6 +290,7 @@ class Gateway:
             cost_usd=amount.cost_usd,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
+            billable=model.billable,
         )
 
         return CompletionResult(

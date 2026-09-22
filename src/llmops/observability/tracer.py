@@ -107,6 +107,7 @@ class Tracer:
         resolved_target: str | None = None,
         parent_span_id: str | None = None,
         attempt: int = 1,
+        billable: bool = True,
     ) -> tuple[str, bool]:
         """呼び出し**前**に1行入れる。戻りは (span_id, request_text を切り詰めたか)。"""
         span_id = new_id()
@@ -135,6 +136,7 @@ class Tracer:
                     resolved_target=resolved_target,
                     parent_span_id=parent_span_id,
                     attempt=attempt,
+                    billable=billable,
                 )
             ),
         )
