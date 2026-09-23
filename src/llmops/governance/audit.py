@@ -34,6 +34,7 @@ KNOWN_EVENTS = (
     "catalog.set_owner",
     "retention.apply",
     "budget.set",
+    "report.weekly",
     "budget.warn",
 )
 

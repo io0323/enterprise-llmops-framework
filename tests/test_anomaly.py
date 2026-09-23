@@ -262,3 +262,104 @@ def test_anomaly_does_not_block_calls(runtime: Runtime, repo: Repository) -> Non
         )
     )
     assert result.text
+
+
+# ---------------------------------------------------------------------------
+# 移動中央値の盲点と、月次の絶対値比較(N-046 追記)
+# ---------------------------------------------------------------------------
+
+
+def _sustained_doubling(repo: Repository) -> None:
+    """10日前から二重起動が続いている状態(日額 2.0 → 60.0 のまま)。"""
+    from datetime import date, timedelta
+
+    start = date(2026, 7, 1)
+    changed = date(2026, 9, 13)
+    end = date.fromisoformat(TODAY)
+    day = start
+    while day <= end:
+        _cost(repo, day.isoformat(), "cgmp", 60.0 if day >= changed else 2.0)
+        day += timedelta(days=1)
+
+
+def test_a_sustained_anomaly_disappears_from_weekly_detection(repo: Repository) -> None:
+    """**盲点そのものを挙動として残す。**
+
+    二重起動が続くと、異常値のほうが中央値になり、週次の検知は沈黙する。
+    移動基準である以上これは避けられない(閾値を厳しくすると誤検知が増えて
+    レポートが読まれなくなる)。だから月次の絶対値比較で拾う、という役割分担にした。
+    """
+    _sustained_doubling(repo)
+
+    # 直近7日を見る週次レポートでは、もう何も出ない
+    assert find_anomalies(repo, _config(), since_day=_days(7)[0], today=TODAY) == []
+
+
+def test_previous_period_comparison_catches_what_weekly_misses(repo: Repository) -> None:
+    """同じ状況を、前期間との実数比較なら拾える(週次=跳ね / 月次=水準)。"""
+    _sustained_doubling(repo)
+
+    markdown = cost_report(
+        repo,
+        since=datetime(2026, 8, 25, tzinfo=UTC),
+        now=NOW,
+        anomaly_config=_config(),
+        compare_previous=True,
+    )
+
+    # 週次の見方(移動中央値)は沈黙している
+    weekly = find_anomalies(repo, _config(), since_day=_days(7)[0], today=TODAY)
+    assert weekly == []
+    # 月次の実数比較では水準の差がはっきり出る(698.0 - 60.0)
+    assert "前期間との比較" in markdown
+    assert "+638.000000" in markdown
+
+
+def test_comparison_uses_the_same_length_window(repo: Repository) -> None:
+    _cost(repo, "2026-09-20", "cgmp", 5.0)
+    _cost(repo, "2026-09-10", "cgmp", 3.0)
+
+    markdown = cost_report(
+        repo, since=datetime(2026, 9, 17, tzinfo=UTC), now=NOW, compare_previous=True
+    )
+
+    assert "今期間: 2026-09-17 〜 2026-09-23(7日)" in markdown
+    assert "前期間: 2026-09-10 〜 2026-09-16(7日)" in markdown
+    assert "| cgmp | 0.000000 | 0.000000 | +0.000000 | 5.000000 | 3.000000 | +2.000000" in markdown
+
+
+def test_comparison_separates_billable_from_subscription(repo: Repository) -> None:
+    _cost(repo, "2026-09-20", "harness", 1.0, billable=True)
+    _cost(repo, "2026-09-20", "cgmp", 4.0)
+
+    markdown = cost_report(
+        repo, since=datetime(2026, 9, 17, tzinfo=UTC), now=NOW, compare_previous=True
+    )
+
+    assert "| harness | 1.000000 |" in markdown
+    assert "| cgmp | 0.000000 | 0.000000 | +0.000000 | 4.000000 |" in markdown
+
+
+def test_comparison_counts_traces(repo: Repository) -> None:
+    """コストが動かない暴走(安い処理)は trace 数の差で出る。"""
+    _traces(repo, "2026-09-20", "dde", 200)
+    _traces(repo, "2026-09-10", "dde", 3)
+
+    markdown = cost_report(
+        repo, since=datetime(2026, 9, 17, tzinfo=UTC), now=NOW, compare_previous=True
+    )
+
+    assert "| 200 | 3 | +197 |" in markdown
+
+
+def test_comparison_is_off_by_default(repo: Repository) -> None:
+    _cost(repo, "2026-09-20", "cgmp", 5.0)
+    markdown = cost_report(repo, since=datetime(2026, 9, 17, tzinfo=UTC), now=NOW)
+    assert "前期間との比較" not in markdown
+
+
+def test_comparison_without_records_says_so(repo: Repository) -> None:
+    markdown = cost_report(
+        repo, since=datetime(2026, 9, 17, tzinfo=UTC), now=NOW, compare_previous=True
+    )
+    assert "比較できる記録がありません" in markdown

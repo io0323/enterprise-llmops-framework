@@ -10,15 +10,70 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from llmops.config import AnomalyConfig
 from llmops.db.repository import Repository
+from llmops.logging_utils import get_logger
 from llmops.observability.anomaly import anomaly_lines, find_anomalies
+
+logger = get_logger(__name__)
 
 _SINCE_RE = re.compile(r"^(\d+)([dhw])$")
 
 GROUP_KEYS = ("system", "model", "prompt")
+
+#: 週次レポートを生成したことを残す監査イベント。鮮度の判定はこの記録を見る
+WEEKLY_REPORT_EVENT = "report.weekly"
+
+
+def record_weekly_report(repo: Repository, *, destination: str, since: str) -> None:
+    """週次レポートを生成したことを記録する。失敗しても本処理は止めない。"""
+    try:
+        repo.insert_audit_log(
+            event=WEEKLY_REPORT_EVENT, subject=destination, detail={"since": since}
+        )
+    except Exception as exc:  # noqa: BLE001 - 記録の失敗でレポート生成を無かったことにしない
+        logger.warning("週次レポートの生成記録に失敗しました: %s", exc)
+
+
+def last_weekly_report(repo: Repository) -> datetime | None:
+    """最後に週次レポートを生成した時刻。1度も無ければ None。"""
+    rows = repo.list_audit_logs(event=WEEKLY_REPORT_EVENT, limit=1)
+    if not rows:
+        return None
+    stamp = str(rows[0]["created_at"] or "")
+    try:
+        return datetime.fromisoformat(stamp).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def weekly_report_staleness(
+    repo: Repository, *, stale_days: int, now: datetime | None = None
+) -> str | None:
+    """放置されていれば1行返す。問題なければ None。
+
+    **出すだけで、止めない・自動実行もしない**(N-046 / N-047)。定期実行が
+    落ちていても、次に誰かが `llmops` を叩いた時点で気付けるようにするためのもの。
+    """
+    if stale_days <= 0:
+        return None
+    moment = now or datetime.now(UTC)
+    last = last_weekly_report(repo)
+    if last is None:
+        return (
+            "週次レポートがまだ1度も生成されていません "
+            "(`llmops report weekly --out weekly.md`。定期実行は docs/04 §2)"
+        )
+    days = (moment - last).days
+    if days < stale_days:
+        return None
+    return (
+        f"前回の週次レポートから {days} 日経過しています"
+        f"({last.strftime('%Y-%m-%d')} が最後)。"
+        "定期実行が止まっていないか確認してください(docs/04 §2)"
+    )
 
 
 def parse_since(value: str, *, now: datetime | None = None) -> datetime:
@@ -130,6 +185,95 @@ def collect(
     return sorted(buckets.values(), key=lambda b: (-b.cost_usd, b.key))
 
 
+@dataclass
+class PeriodTotals:
+    """1期間・1 system の実数。倍率ではなく**実数**で前期間と並べるためのもの。"""
+
+    billable_usd: float = 0.0
+    subscription_usd: float = 0.0
+    traces: int = 0
+
+    @property
+    def total_usd(self) -> float:
+        return self.billable_usd + self.subscription_usd
+
+
+def _period_totals(
+    repo: Repository, *, start_day: str, end_day: str
+) -> dict[str, PeriodTotals]:
+    """`start_day` <= day <= `end_day` の system 別合計(日単位の集計表から取る)。"""
+    totals: dict[str, PeriodTotals] = {}
+    for row in repo.daily_cost_by_system(since_day=start_day):
+        day = str(row["day"])
+        if day > end_day:
+            continue
+        entry = totals.setdefault(str(row["system"]), PeriodTotals())
+        cost = float(row["cost_usd"] or 0.0)
+        if bool(row["billable"]):
+            entry.billable_usd += cost
+        else:
+            entry.subscription_usd += cost
+    for row in repo.daily_trace_counts(since_day=start_day):
+        if str(row["day"]) > end_day:
+            continue
+        totals.setdefault(str(row["system"]), PeriodTotals()).traces += int(row["traces"] or 0)
+    return totals
+
+
+def _delta(current: float, previous: float, *, decimals: int = 6) -> str:
+    """実数の差。倍率にしない(前期間が 0 のときに倍率は意味を持たないため)。"""
+    diff = current - previous
+    sign = "+" if diff >= 0 else "−"
+    return f"{sign}{abs(diff):.{decimals}f}" if decimals else f"{sign}{abs(diff):.0f}"
+
+
+def compare_previous_lines(
+    repo: Repository, *, since: datetime, now: datetime
+) -> list[str]:
+    """前期間との**絶対値**比較(NOTES.md N-046)。
+
+    週次の異常検知は「直近の中央値に対する跳ね」を見るので、**持続した異常は
+    数日で中央値に取り込まれて出なくなる**。移動基準である以上これは避けられない。
+    水準そのものがずれたことは、期間をまたいだ実数の比較でしか分からない。
+    """
+    end_day = now.astimezone(UTC).strftime("%Y-%m-%d")
+    start_day = since.astimezone(UTC).strftime("%Y-%m-%d")
+    length = max(1, (date.fromisoformat(end_day) - date.fromisoformat(start_day)).days + 1)
+    previous_end = (date.fromisoformat(start_day) - timedelta(days=1)).isoformat()
+    previous_start = (date.fromisoformat(previous_end) - timedelta(days=length - 1)).isoformat()
+
+    current = _period_totals(repo, start_day=start_day, end_day=end_day)
+    previous = _period_totals(repo, start_day=previous_start, end_day=previous_end)
+    if not current and not previous:
+        return ["比較できる記録がありません。"]
+
+    lines = [
+        f"- 今期間: {start_day} 〜 {end_day}({length}日)",
+        f"- 前期間: {previous_start} 〜 {previous_end}({length}日)",
+        "",
+        "| system | 実課金(USD) | 前期間 | 差 | 対象外(USD) | 前期間 | 差 | trace | 前期間 | 差 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for key in sorted(set(current) | set(previous)):
+        this, last = current.get(key, PeriodTotals()), previous.get(key, PeriodTotals())
+        lines.append(
+            f"| {key} | {this.billable_usd:.6f} | {last.billable_usd:.6f} |"
+            f" {_delta(this.billable_usd, last.billable_usd)} |"
+            f" {this.subscription_usd:.6f} | {last.subscription_usd:.6f} |"
+            f" {_delta(this.subscription_usd, last.subscription_usd)} |"
+            f" {this.traces} | {last.traces} |"
+            f" {_delta(this.traces, last.traces, decimals=0)} |"
+        )
+    lines += [
+        "",
+        "**倍率ではなく実数で見る。** 週次の異常検知は移動中央値なので、"
+        "持続した異常は数日で「普段」に取り込まれて出なくなる"
+        "(スケジューラの二重起動など)。水準がずれたままになっていないかは"
+        "ここでしか分からない(NOTES.md N-046)。",
+    ]
+    return lines
+
+
 def cost_report(
     repo: Repository,
     *,
@@ -138,10 +282,12 @@ def cost_report(
     system: str | None = None,
     now: datetime | None = None,
     anomaly_config: AnomalyConfig | None = None,
+    compare_previous: bool = False,
 ) -> str:
     """コストレポート(Markdown)。"""
     buckets = collect(repo, since=since, by=by, system=system)
-    generated = (now or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    moment = now or datetime.now(UTC)
+    generated = moment.strftime("%Y-%m-%d %H:%M:%S UTC")
 
     lines = [
         "# ELF コストレポート",
@@ -157,6 +303,10 @@ def cost_report(
         「記録が無い」ことと「見ていない」ことを混ぜない。cost_daily に記録が
         あるのに spans が無い、という食い違い自体が異常の手がかりになる。
         """
+        if compare_previous:
+            body = body + ["", "## 前期間との比較(水準の変化)", ""] + compare_previous_lines(
+                repo, since=since, now=moment
+            )
         if anomaly_config is None:
             return "\n".join(body) + "\n"
         # サブスク換算のコストには上限を置かない。代わりに普段との比で見る(N-046)

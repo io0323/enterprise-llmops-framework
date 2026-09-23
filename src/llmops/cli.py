@@ -33,7 +33,12 @@ from llmops.guard.policy import check as policy_check_all
 from llmops.guard.policy import load_policies
 from llmops.logging_utils import get_logger, setup_logging
 from llmops.models import CompletionRequest
-from llmops.observability.report import cost_report, parse_since
+from llmops.observability.report import (
+    cost_report,
+    parse_since,
+    record_weekly_report,
+    weekly_report_staleness,
+)
 from llmops.observability.tracer import new_id
 from llmops.prompt import catalog as prompt_catalog
 from llmops.prompt.registry import PromptRegistry
@@ -73,6 +78,36 @@ CONFIG_OPTION = typer.Option(None, "--config", help="config.yaml のパス")
 @app.callback()
 def main() -> None:
     """ELF CLI."""
+    _warn_if_the_weekly_report_is_stale()
+
+
+def _warn_if_the_weekly_report_is_stale() -> None:
+    """週次レポートが放置されていれば1行だけ知らせる(NOTES.md N-047)。
+
+    **止めない・何も自動実行しない。** N-046 で「検知しても止めない」を選んだ以上、
+    警告が人に届くことが唯一の防御になる。定期実行(launchd)が落ちていても、
+    次に `llmops` を叩いた時点で気付けるようにするための経路。
+
+    `--config` はサブコマンドの引数なのでここでは見えない。既定の解決
+    (`ELF_CONFIG` → リポジトリの config.yaml)で足りる範囲の best-effort とし、
+    失敗したら黙る(この通知のためにコマンドを止めない)。
+    標準出力は Markdown の出力先になりうるので、必ず stderr に出す。
+    """
+    try:
+        config = load_config()
+        if config.report.weekly_stale_days <= 0 or not config.db_path.is_file():
+            return
+        repo = Repository.open(config.db_path)
+        try:
+            line = weekly_report_staleness(
+                repo, stale_days=config.report.weekly_stale_days
+            )
+        finally:
+            repo.close()
+    except Exception:  # noqa: BLE001 - 通知の失敗でコマンドを止めない(絶対ルール4と同じ扱い)
+        return
+    if line:
+        typer.echo(f"[!] {line}", err=True)
 
 
 def _load(config_path: str | None = None) -> Config:
@@ -614,16 +649,26 @@ def report_cost(
     since: str = typer.Option("30d", "--since", help="7d / 24h / 2026-09-01"),
     by: str = typer.Option("system", "--by", help="system / model / prompt"),
     system: str | None = typer.Option(None, "--system"),
+    compare_previous: bool = typer.Option(
+        False,
+        "--compare-previous",
+        help="同じ長さの前期間と実数で比べる(月次で水準の変化を見る)",
+    ),
     out: str | None = typer.Option(None, "--out", help="Markdown の出力先"),
     config_path: str | None = CONFIG_OPTION,
 ) -> None:
-    """コストレポート(Markdown)。"""
+    """コストレポート(Markdown)。
+
+    `--compare-previous` は `--since` と同じ長さの前期間を自動で取り、
+    system 別の実数(実課金 / 対象外 / trace 数)を並べる。週次の異常検知が
+    移動中央値で見落とす「持続した異常」を拾うための見方(NOTES.md N-046)。
+    """
     config = _load(config_path)
     repo = _open(config)
     try:
         markdown = cost_report(
             repo, since=parse_since(since), by=by, system=system,
-            anomaly_config=config.anomaly,
+            anomaly_config=config.anomaly, compare_previous=compare_previous,
         )
     finally:
         repo.close()
@@ -1140,18 +1185,22 @@ def report_weekly(
     """週次レポート(コスト・評価・Policy・台帳・要注意イベントを1枚に)。"""
     config = _load(config_path)
     runtime = Runtime.build(config)
+    path = None if out is None else Path(out)
+    if path is not None and not path.is_absolute():
+        path = config.report_dir / path
     try:
         markdown = weekly_report(runtime, since=_sql_time(parse_since(since)),
                                  stale_days=stale_days)
+        # 生成したことを残す。これが「放置されていないか」の判定材料になる(N-047)
+        record_weekly_report(
+            runtime.repo, destination=str(path) if path else "(stdout)", since=since
+        )
     finally:
         runtime.close()
 
-    if out is None:
+    if path is None:
         typer.echo(markdown)
         return
-    path = Path(out)
-    if not path.is_absolute():
-        path = config.report_dir / path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")
     typer.echo(f"written: {path}")
