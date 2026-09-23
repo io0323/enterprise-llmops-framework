@@ -14,11 +14,66 @@ from datetime import UTC, date, datetime, timedelta
 
 from llmops.config import AnomalyConfig
 from llmops.db.repository import Repository
+from llmops.logging_utils import get_logger
 from llmops.observability.anomaly import anomaly_lines, find_anomalies
+
+logger = get_logger(__name__)
 
 _SINCE_RE = re.compile(r"^(\d+)([dhw])$")
 
 GROUP_KEYS = ("system", "model", "prompt")
+
+#: 週次レポートを生成したことを残す監査イベント。鮮度の判定はこの記録を見る
+WEEKLY_REPORT_EVENT = "report.weekly"
+
+
+def record_weekly_report(repo: Repository, *, destination: str, since: str) -> None:
+    """週次レポートを生成したことを記録する。失敗しても本処理は止めない。"""
+    try:
+        repo.insert_audit_log(
+            event=WEEKLY_REPORT_EVENT, subject=destination, detail={"since": since}
+        )
+    except Exception as exc:  # noqa: BLE001 - 記録の失敗でレポート生成を無かったことにしない
+        logger.warning("週次レポートの生成記録に失敗しました: %s", exc)
+
+
+def last_weekly_report(repo: Repository) -> datetime | None:
+    """最後に週次レポートを生成した時刻。1度も無ければ None。"""
+    rows = repo.list_audit_logs(event=WEEKLY_REPORT_EVENT, limit=1)
+    if not rows:
+        return None
+    stamp = str(rows[0]["created_at"] or "")
+    try:
+        return datetime.fromisoformat(stamp).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def weekly_report_staleness(
+    repo: Repository, *, stale_days: int, now: datetime | None = None
+) -> str | None:
+    """放置されていれば1行返す。問題なければ None。
+
+    **出すだけで、止めない・自動実行もしない**(N-046 / N-047)。定期実行が
+    落ちていても、次に誰かが `llmops` を叩いた時点で気付けるようにするためのもの。
+    """
+    if stale_days <= 0:
+        return None
+    moment = now or datetime.now(UTC)
+    last = last_weekly_report(repo)
+    if last is None:
+        return (
+            "週次レポートがまだ1度も生成されていません "
+            "(`llmops report weekly --out weekly.md`。定期実行は docs/04 §2)"
+        )
+    days = (moment - last).days
+    if days < stale_days:
+        return None
+    return (
+        f"前回の週次レポートから {days} 日経過しています"
+        f"({last.strftime('%Y-%m-%d')} が最後)。"
+        "定期実行が止まっていないか確認してください(docs/04 §2)"
+    )
 
 
 def parse_since(value: str, *, now: datetime | None = None) -> datetime:

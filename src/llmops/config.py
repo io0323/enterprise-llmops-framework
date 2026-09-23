@@ -93,6 +93,17 @@ class EvalConfig(_Base):
     mock_is_wiring_check: bool = True
 
 
+class ReportConfig(_Base):
+    """レポートの鮮度(NOTES.md N-047)。
+
+    N-046 で「止めない・警告するだけ」を選んだので、**警告が人に届くことが唯一の防御**。
+    定期実行が止まっていても、次に `llmops` を叩いた時点で気付ける状態にしておく。
+    """
+
+    #: 前回の週次レポートからこの日数を超えたら、どのコマンドでも1行知らせる。0 で無効
+    weekly_stale_days: int = 10
+
+
 class AnomalyConfig(_Base):
     """異常検知(NOTES.md N-046)。**止めるためではなく気付くための設定**。
 
@@ -136,6 +147,7 @@ class Config(_Base):
     trace: TraceConfig = Field(default_factory=TraceConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
+    report: ReportConfig = Field(default_factory=ReportConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

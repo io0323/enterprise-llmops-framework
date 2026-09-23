@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  週次レポートの定期実行(Phase 3 Step 3-7)。
+
+  月曜 08:00 に `ops/weekly_report.sh` を1回だけ走らせる。常駐はしない。
+  導入手順と、止まっていたときの気付き方は docs/04_運用ガイド.md §2 を見ること。
+
+  パスは環境依存なので、このファイルを ~/Library/LaunchAgents へコピーするときに
+  自分の環境へ書き換える(ELF_HOME / LLMOPS_BIN)。
+  **マシン側だけに置かない**: 実体をリポジトリに残し、設定が見えない状態にしない。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.elf.weekly-report</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/Users/io/projects/GitHub/engine/需要発見エンジン/enterprise-llmops-framework/ops/weekly_report.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ELF_HOME</key>
+        <string>/Users/io/projects/GitHub/engine/需要発見エンジン/enterprise-llmops-framework</string>
+        <key>LLMOPS_BIN</key>
+        <string>/Users/io/opt/anaconda3/envs/llmops/bin/llmops</string>
+    </dict>
+
+    <!-- 月曜 08:00。スリープで実行時刻を逃した場合は、起動後に1度だけ走る -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- load しただけでは走らせない(手で流したいときは kickstart を使う) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/io/projects/GitHub/engine/需要発見エンジン/enterprise-llmops-framework/logs/weekly-report.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/io/projects/GitHub/engine/需要発見エンジン/enterprise-llmops-framework/logs/weekly-report.err.log</string>
+</dict>
+</plist>
