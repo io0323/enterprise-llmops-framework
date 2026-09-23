@@ -10,6 +10,7 @@ N-046 で「検知しても止めない」を選んだので、**警告が人に
 
 from __future__ import annotations
 
+import plistlib
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -155,12 +156,24 @@ def test_the_launchd_plist_is_in_the_repository() -> None:
     assert "<key>RunAtLoad</key>\n    <false/>" in body, "load しただけで走らせない"
 
 
-def test_the_plist_is_valid() -> None:
+def test_the_plist_parses_as_xml() -> None:
+    """壊れた plist をコミットしない。macOS 以外(CI)でも読める形で検証する。"""
     plist = OPS / "launchd" / "io.elf.weekly-report.plist"
-    result = subprocess.run(
-        ["plutil", "-lint", str(plist)], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0 and "not found" in (result.stderr or ""):
+    parsed = plistlib.loads(plist.read_bytes())
+    assert parsed["Label"] == "io.elf.weekly-report"
+    assert parsed["RunAtLoad"] is False
+    assert parsed["StartCalendarInterval"]["Weekday"] == 1
+    assert parsed["ProgramArguments"][-1].endswith("ops/weekly_report.sh")
+
+
+def test_the_plist_passes_plutil_when_available() -> None:
+    """macOS では launchd と同じパーサで見る。無い環境ではスキップ。"""
+    plist = OPS / "launchd" / "io.elf.weekly-report.plist"
+    try:
+        result = subprocess.run(
+            ["plutil", "-lint", str(plist)], capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
         pytest.skip("plutil が無い環境(macOS 以外)")
     assert result.returncode == 0, result.stdout + result.stderr
 
