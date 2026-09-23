@@ -831,7 +831,11 @@ class Repository:
     def daily_cost_by_system(
         self, *, since_day: str, billable: bool | None = None
     ) -> list[sqlite3.Row]:
-        """日 × system のコスト。`billable` を指定するとその種別だけ。"""
+        """日 × system × billable のコスト。`billable` を指定するとその種別だけ。
+
+        種別を落とさずに返す。呼び出し側が「実課金 / 対象外」を分けて集計できるように
+        するため(前期間との比較は両方を並べて見る)。
+        """
         clauses = ["day >= ?"]
         params: list[Any] = [since_day]
         if billable is not None:
@@ -839,9 +843,9 @@ class Repository:
             params.append(int(billable))
         return list(
             self.conn.execute(
-                "SELECT day, system, SUM(cost_usd) AS cost_usd FROM cost_daily"
+                "SELECT day, system, billable, SUM(cost_usd) AS cost_usd FROM cost_daily"
                 f" WHERE {' AND '.join(clauses)}"
-                " GROUP BY day, system ORDER BY day",
+                " GROUP BY day, system, billable ORDER BY day",
                 tuple(params),
             ).fetchall()
         )

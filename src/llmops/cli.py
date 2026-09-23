@@ -614,16 +614,26 @@ def report_cost(
     since: str = typer.Option("30d", "--since", help="7d / 24h / 2026-09-01"),
     by: str = typer.Option("system", "--by", help="system / model / prompt"),
     system: str | None = typer.Option(None, "--system"),
+    compare_previous: bool = typer.Option(
+        False,
+        "--compare-previous",
+        help="同じ長さの前期間と実数で比べる(月次で水準の変化を見る)",
+    ),
     out: str | None = typer.Option(None, "--out", help="Markdown の出力先"),
     config_path: str | None = CONFIG_OPTION,
 ) -> None:
-    """コストレポート(Markdown)。"""
+    """コストレポート(Markdown)。
+
+    `--compare-previous` は `--since` と同じ長さの前期間を自動で取り、
+    system 別の実数(実課金 / 対象外 / trace 数)を並べる。週次の異常検知が
+    移動中央値で見落とす「持続した異常」を拾うための見方(NOTES.md N-046)。
+    """
     config = _load(config_path)
     repo = _open(config)
     try:
         markdown = cost_report(
             repo, since=parse_since(since), by=by, system=system,
-            anomaly_config=config.anomaly,
+            anomaly_config=config.anomaly, compare_previous=compare_previous,
         )
     finally:
         repo.close()
